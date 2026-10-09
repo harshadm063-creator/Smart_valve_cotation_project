@@ -39,6 +39,8 @@ def calculate_volume(shape: str, dims: Dict[str, float]) -> float:
         length = dims.get("length", 0.0)
         width = dims.get("width", 0.0)
         thickness = dims.get("thickness", 0.0)
+        if length == 0 and width == 0 and thickness == 0:
+            return 0.0
         if length <= 0 or width <= 0 or thickness <= 0:
             raise EngineeringValidationError(
                 f"Plate dimensions must be positive numbers. Got L={length}, W={width}, T={thickness}"
@@ -48,6 +50,8 @@ def calculate_volume(shape: str, dims: Dict[str, float]) -> float:
     elif s in ("round_bar", "round bar", "bar", "shaft", "pin"):
         diameter = dims.get("diameter", 0.0)
         length = dims.get("length", 0.0)
+        if diameter == 0 and length == 0:
+            return 0.0
         if diameter <= 0 or length <= 0:
             raise EngineeringValidationError(
                 f"Round bar dimensions must be positive numbers. Got Dia={diameter}, L={length}"
@@ -60,6 +64,8 @@ def calculate_volume(shape: str, dims: Dict[str, float]) -> float:
         wall_thickness = dims.get("wall_thickness", 0.0)
         length = dims.get("length", 0.0)
 
+        if outer_diameter == 0 and wall_thickness == 0 and length == 0:
+            return 0.0
         if outer_diameter <= 0 or wall_thickness <= 0 or length <= 0:
             raise EngineeringValidationError(
                 f"Pipe dimensions must be positive numbers. Got OD={outer_diameter}, Wall={wall_thickness}, L={length}"

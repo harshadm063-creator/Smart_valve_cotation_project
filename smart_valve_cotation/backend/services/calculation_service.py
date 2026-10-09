@@ -11,6 +11,18 @@ from backend.engine.calculation import (
 )
 from backend.schemas import BOMItemInput, CostBreakdown, BOMItemResponse, BoughtOutItemSchema, ActuationPackageSchema
 
+
+def _bom_item_to_dict(item: Any) -> Dict[str, Any]:
+    """Support both Pydantic v2 model_dump() and v1 dict() objects while accepting plain dicts."""
+    if hasattr(item, "model_dump"):
+        return item.model_dump()
+    if hasattr(item, "dict"):
+        return item.dict()
+    if isinstance(item, dict):
+        return item
+    raise TypeError(f"Unsupported BOM item type: {type(item).__name__}")
+
+
 def calculate_full_estimate(
     db: Session,
     equipment_type: str,
@@ -51,7 +63,7 @@ def calculate_full_estimate(
     raw_bom_items: List[Dict[str, Any]] = []
     if custom_bom and len(custom_bom) > 0:
         for item in custom_bom:
-            raw_bom_items.append(item.model_dump())
+            raw_bom_items.append(_bom_item_to_dict(item))
     else:
         raw_bom_items = generate_standard_bom(
             equipment_type=equipment_type,
@@ -124,7 +136,7 @@ def calculate_full_estimate(
         item_cutting_cost = 0.0 if is_purchased else total_wt * cutting_rate
         machining_rate = float(item.get("unit_machining_rate", 0.0) or 0.0)
         machining_cost_value = item.get("machining_cost")
-        if machining_cost_value is not None and float(machining_cost_value or 0.0) > 0:
+        if machining_cost_value is not None:
             item_machining_cost = float(machining_cost_value)
         elif is_purchased:
             item_machining_cost = 0.0

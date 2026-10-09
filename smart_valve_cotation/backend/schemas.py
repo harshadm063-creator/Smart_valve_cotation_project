@@ -72,7 +72,9 @@ class BOMItemInput(BaseModel):
     wall_thickness: float = 0.0
     quantity: int = 1
     unit_machining_rate: float = 0.0
+    machining_cost: Optional[float] = Field(None, ge=0)
     unit: str = "piece"
+    unit_weight: Optional[float] = Field(None, ge=0)
     unit_weight_override: Optional[float] = Field(None, ge=0)
     unit_material_rate: Optional[float] = Field(None, ge=0)
     rate_source: str = "material_default"

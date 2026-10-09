@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   FileText,
   UploadCloud,
@@ -110,7 +110,7 @@ export default function App() {
       project_name: 'Supercritical Thermal FGD Unit',
       rfq_number: 'RFQ-NTPC-FGD-2026-904',
       delivery_location: 'Ramagundam Site, Telangana',
-      equipment_type: 'Rack & Pinion Damper',
+      equipment_type: 'Butterfly Valve',
       tag_number: 'DMP-FGD-ISOL-01',
       quantity: 1,
       length: initialDims.length,
@@ -123,13 +123,14 @@ export default function App() {
       tax_percent: 18,
       margin_percent: 15,
       status: 'Draft',
-      custom_bom: getDefaultComponentTemplate('Rack & Pinion Damper', initialDims, STANDARD_MATERIALS)
+      custom_bom: getDefaultComponentTemplate('Butterfly Valve', initialDims, STANDARD_MATERIALS)
     };
   });
 
   // Active calculation / estimate details
   const [estimateResult, setEstimateResult] = useState<EstimateCalculationResponse | null>(null);
   const [savedQuoteDetail, setSavedQuoteDetail] = useState<QuotationDetail | null>(null);
+  const calculationRequestId = useRef(0);
 
   // Load initial options & dashboard quotations
   useEffect(() => {
@@ -173,6 +174,29 @@ export default function App() {
       setSuccessMsg(msg);
       setTimeout(() => setSuccessMsg(null), 4000);
     }
+  }
+
+  async function calculateAndSetPreview(config: EquipmentConfig): Promise<EstimateCalculationResponse> {
+    const requestId = ++calculationRequestId.current;
+    setEstimateResult(null);
+    try {
+      const result = await calculateEstimatePreview(config);
+      if (requestId === calculationRequestId.current) {
+        setEstimateResult(result);
+      }
+      return result;
+    } catch (err) {
+      if (requestId === calculationRequestId.current) {
+        setEstimateResult(null);
+      }
+      throw err;
+    }
+  }
+
+  function refreshEstimatePreview(config: EquipmentConfig) {
+    calculateAndSetPreview(config).catch(err => {
+      showToast(err.message || 'Failed to recalculate estimate', true);
+    });
   }
 
   // Helper to check if current BOM differs from default template
@@ -224,9 +248,7 @@ export default function App() {
     setPendingEquipmentType(null);
 
     // Recalculate preview
-    calculateEstimatePreview(updated)
-      .then(res => setEstimateResult(res))
-      .catch(() => {});
+    refreshEstimatePreview(updated);
 
     showToast(`Loaded ${newType} with ${newBOM.length} component template.`);
   }
@@ -272,9 +294,7 @@ export default function App() {
     setCurrentConfig(updatedConfig);
 
     // Trigger preview calculation in background
-    calculateEstimatePreview(updatedConfig)
-      .then(res => setEstimateResult(res))
-      .catch(() => {});
+    refreshEstimatePreview(updatedConfig);
   }
 
   // Add Custom Component
@@ -307,9 +327,7 @@ export default function App() {
     const updatedBom = [...currentList, newItem];
     const updatedConfig = { ...currentConfig, custom_bom: updatedBom };
     setCurrentConfig(updatedConfig);
-    calculateEstimatePreview(updatedConfig)
-      .then(res => setEstimateResult(res))
-      .catch(() => {});
+    refreshEstimatePreview(updatedConfig);
 
     showToast(`Added new component "${newItem.part_name}".`);
   }
@@ -329,9 +347,7 @@ export default function App() {
     const updatedBom = [...currentList.slice(0, index + 1), dupItem, ...currentList.slice(index + 1)];
     const updatedConfig = { ...currentConfig, custom_bom: updatedBom };
     setCurrentConfig(updatedConfig);
-    calculateEstimatePreview(updatedConfig)
-      .then(res => setEstimateResult(res))
-      .catch(() => {});
+    refreshEstimatePreview(updatedConfig);
 
     showToast(`Duplicated component "${target.part_name}".`);
   }
@@ -347,9 +363,7 @@ export default function App() {
     const updatedBom = currentList.filter((_, i) => i !== index);
     const updatedConfig = { ...currentConfig, custom_bom: updatedBom };
     setCurrentConfig(updatedConfig);
-    calculateEstimatePreview(updatedConfig)
-      .then(res => setEstimateResult(res))
-      .catch(() => {});
+    refreshEstimatePreview(updatedConfig);
 
     showToast(`Removed "${removedName}".`);
   }
@@ -364,9 +378,7 @@ export default function App() {
 
     const updatedConfig = { ...currentConfig, custom_bom: template };
     setCurrentConfig(updatedConfig);
-    calculateEstimatePreview(updatedConfig)
-      .then(res => setEstimateResult(res))
-      .catch(() => {});
+    refreshEstimatePreview(updatedConfig);
 
     showToast(`Reset ${currentConfig.equipment_type} to default engineering template.`);
   }
@@ -405,6 +417,20 @@ export default function App() {
     const taxPct = currentConfig.tax_percent || 0;
     const taxAmt = taxable * (taxPct / 100);
     const finalAmount = taxable + taxAmt;
+    const calculatedCosts = estimateResult?.cost_breakdown;
+
+    if (calculatedCosts) {
+      totalWeight = estimateResult.total_weight_kg;
+      totalRawMaterialCost = calculatedCosts.raw_material_cost;
+      totalMachiningFabCost = calculatedCosts.cutting_cost
+        + calculatedCosts.machining_cost
+        + calculatedCosts.fabrication_cost
+        + calculatedCosts.finishing_cost;
+      totalBOMCost = estimateResult.bom_items.reduce(
+        (sum, item) => sum + (item.component_total || 0),
+        0
+      ) * (currentConfig.quantity || 1);
+    }
 
     return {
       totalItemsCount,
@@ -413,12 +439,12 @@ export default function App() {
       totalRawMaterialCost: Math.round(totalRawMaterialCost * 100) / 100,
       totalMachiningFabCost: Math.round(totalMachiningFabCost * 100) / 100,
       totalBOMCost: Math.round(totalBOMCost * 100) / 100,
-      subtotal: Math.round(subtotal * 100) / 100,
-      marginAmt: Math.round(marginAmt * 100) / 100,
-      taxAmt: Math.round(taxAmt * 100) / 100,
-      finalAmount: Math.round(finalAmount * 100) / 100
+      subtotal: calculatedCosts?.subtotal ?? Math.round(subtotal * 100) / 100,
+      marginAmt: calculatedCosts?.margin_amount ?? Math.round(marginAmt * 100) / 100,
+      taxAmt: calculatedCosts?.tax_amount ?? Math.round(taxAmt * 100) / 100,
+      finalAmount: calculatedCosts?.final_amount ?? Math.round(finalAmount * 100) / 100
     };
-  }, [currentConfig]);
+  }, [currentConfig, estimateResult]);
 
   // --- PDF Import & Extraction Workflow ---
   async function handleFileUpload(file: File) {
@@ -490,8 +516,7 @@ export default function App() {
 
     try {
       setLoading(true);
-      const res = await calculateEstimatePreview(currentConfig);
-      setEstimateResult(res);
+      await calculateAndSetPreview(currentConfig);
       setActiveTab('bom_editor');
       showToast('Bill of Materials loaded and validated with centralized cost engine.');
     } catch (err: any) {
@@ -557,13 +582,12 @@ export default function App() {
         status: detail.status,
         custom_bom: detail.bom_items
       });
-      const res = await calculateEstimatePreview({
+      await calculateAndSetPreview({
         ...detail,
         custom_bom: detail.bom_items,
         tax_percent: detail.cost_breakdown.tax_percent,
         margin_percent: detail.cost_breakdown.margin_percent
       });
-      setEstimateResult(res);
       setActiveTab('preview');
     } catch (err: any) {
       showToast(err.message || 'Failed to open quotation', true);
@@ -675,6 +699,7 @@ export default function App() {
             <button
               onClick={() => {
                 setSavedQuoteDetail(null);
+                setEstimateResult(null);
                 setActiveTab('new');
               }}
               className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg transition-colors ${
@@ -689,9 +714,7 @@ export default function App() {
 
             <button
               onClick={() => {
-                if (!estimateResult && currentConfig.custom_bom) {
-                  calculateEstimatePreview(currentConfig).then(res => setEstimateResult(res));
-                }
+                if (currentConfig.custom_bom) refreshEstimatePreview(currentConfig);
                 setActiveTab('bom_editor');
               }}
               className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg transition-colors ${
@@ -706,9 +729,7 @@ export default function App() {
 
             <button
               onClick={() => {
-                if (!estimateResult && currentConfig.custom_bom) {
-                  calculateEstimatePreview(currentConfig).then(res => setEstimateResult(res));
-                }
+                if (currentConfig.custom_bom) refreshEstimatePreview(currentConfig);
                 setActiveTab('results');
               }}
               className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg transition-colors ${
@@ -1421,7 +1442,8 @@ export default function App() {
                     <tbody className="divide-y divide-slate-100">
                       {(currentConfig.custom_bom || []).map((item, idx) => {
                         const rawCost = (item.quantity || 1) * (item.unit_weight || 0) * (item.unit_material_rate || 0);
-                        const compTotal = rawCost + (item.machining_cost || 0);
+                        const compTotal = estimateResult?.bom_items[idx]?.component_total
+                          ?? rawCost + (item.machining_cost || 0);
                         const isCustomRate = item.rate_source === 'custom';
 
                         return (
@@ -1584,7 +1606,7 @@ export default function App() {
                     </div>
 
                     <div>
-                      <p className="text-[10px] text-slate-400 uppercase font-semibold">Machining & Fab</p>
+                      <p className="text-[10px] text-slate-400 uppercase font-semibold">Cutting, Machining & Fab</p>
                       <p className="text-base font-mono font-bold text-slate-200 mt-0.5">
                         {formatINR(bomMetrics.totalMachiningFabCost)}
                       </p>
@@ -1752,7 +1774,8 @@ export default function App() {
                   <tbody className="divide-y divide-slate-100">
                     {(currentConfig.custom_bom || []).map((item, idx) => {
                       const rawCost = (item.quantity || 1) * (item.unit_weight || 0) * (item.unit_material_rate || 0);
-                      const compTotal = rawCost + (item.machining_cost || 0);
+                      const compTotal = estimateResult?.bom_items[idx]?.component_total
+                        ?? rawCost + (item.machining_cost || 0);
                       const isCustomRate = item.rate_source === 'custom';
 
                       return (
@@ -1883,7 +1906,10 @@ export default function App() {
               </button>
 
               <button
-                onClick={() => setActiveTab('results')}
+                onClick={() => {
+                  refreshEstimatePreview(currentConfig);
+                  setActiveTab('results');
+                }}
                 className="px-5 py-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-lg text-xs flex items-center space-x-1.5 shadow-sm"
               >
                 <span>View Complete Cost Breakdown</span>
@@ -1953,23 +1979,68 @@ export default function App() {
                     <td className="py-3 px-4 font-semibold text-slate-900">Raw Material Cost</td>
                     <td className="py-3 px-4 text-slate-500">Component weights × individual material rates</td>
                     <td className="py-3 px-4 text-right font-mono font-semibold text-slate-900">
-                      {formatINR(bomMetrics.totalRawMaterialCost * currentConfig.quantity)}
+                      {formatINR(bomMetrics.totalRawMaterialCost)}
                     </td>
                   </tr>
 
                   <tr>
                     <td className="py-3 px-4 text-slate-400">2</td>
-                    <td className="py-3 px-4 font-semibold text-slate-900">Machining & Fabrication Charges</td>
-                    <td className="py-3 px-4 text-slate-500">Component machining and assembly charges</td>
+                    <td className="py-3 px-4 font-semibold text-slate-900">Cutting Charges</td>
+                    <td className="py-3 px-4 text-slate-500">Weight-based cutting and preparation costs</td>
                     <td className="py-3 px-4 text-right font-mono text-slate-700">
-                      {formatINR(bomMetrics.totalMachiningFabCost * currentConfig.quantity)}
+                      {formatINR(estimateResult?.cost_breakdown.cutting_cost || 0)}
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td className="py-3 px-4 text-slate-400">3</td>
+                    <td className="py-3 px-4 font-semibold text-slate-900">Machining Charges</td>
+                    <td className="py-3 px-4 text-slate-500">Component-specific machining costs</td>
+                    <td className="py-3 px-4 text-right font-mono text-slate-700">
+                      {formatINR(estimateResult?.cost_breakdown.machining_cost || 0)}
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td className="py-3 px-4 text-slate-400">4</td>
+                    <td className="py-3 px-4 font-semibold text-slate-900">Fabrication Charges</td>
+                    <td className="py-3 px-4 text-slate-500">Material and fabrication-rate based costs</td>
+                    <td className="py-3 px-4 text-right font-mono text-slate-700">
+                      {formatINR(estimateResult?.cost_breakdown.fabrication_cost || 0)}
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td className="py-3 px-4 text-slate-400">5</td>
+                    <td className="py-3 px-4 font-semibold text-slate-900">Finishing Charges</td>
+                    <td className="py-3 px-4 text-slate-500">Weight-based finishing costs</td>
+                    <td className="py-3 px-4 text-right font-mono text-slate-700">
+                      {formatINR(estimateResult?.cost_breakdown.finishing_cost || 0)}
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td className="py-3 px-4 text-slate-400">6</td>
+                    <td className="py-3 px-4 font-semibold text-slate-900">Bought-out Components</td>
+                    <td className="py-3 px-4 text-slate-500">Configured purchased components</td>
+                    <td className="py-3 px-4 text-right font-mono text-slate-700">
+                      {formatINR(estimateResult?.cost_breakdown.bought_out_cost || 0)}
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td className="py-3 px-4 text-slate-400">7</td>
+                    <td className="py-3 px-4 font-semibold text-slate-900">Actuation Package</td>
+                    <td className="py-3 px-4 text-slate-500">Actuator, gearbox and accessories</td>
+                    <td className="py-3 px-4 text-right font-mono text-slate-700">
+                      {formatINR(estimateResult?.cost_breakdown.actuation_cost || 0)}
                     </td>
                   </tr>
 
                   {/* Manufacturing Subtotal */}
                   <tr className="bg-slate-50 font-bold border-t-2 border-slate-200">
                     <td colSpan={3} className="py-3 px-4 text-slate-900 text-right">
-                      Manufacturing BOM Subtotal:
+                      Pre-tax Quotation Subtotal:
                     </td>
                     <td className="py-3 px-4 text-right font-mono text-slate-900 text-sm">
                       {formatINR(bomMetrics.subtotal)}

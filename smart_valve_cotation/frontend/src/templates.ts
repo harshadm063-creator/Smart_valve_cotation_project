@@ -42,7 +42,7 @@ export function getDefaultComponentTemplate(
   dimensions: { length: number; width_diameter: number; depth: number },
   materialsList: MaterialItem[] = STANDARD_MATERIALS
 ): BOMItem[] {
-  const { length = 1200, width_diameter = 1000, depth: _depth = 400 } = dimensions;
+  const { length = 1200, width_diameter = 1000, depth = 400 } = dimensions;
   const maxDim = Math.max(length, width_diameter);
   const sizeFactor = Math.max(0.5, Math.min(3.5, maxDim / 1000));
 
@@ -55,13 +55,31 @@ export function getDefaultComponentTemplate(
     unit: string,
     baseWeight: number,
     baseMachining: number,
-    shape: string = 'plate'
+    shape: string = 'plate',
+    lengthOverride?: number,
+    widthOverride?: number,
+    thicknessOverride?: number,
+    diameterOverride?: number
   ): BOMItem => {
     const unit_weight = Math.round(baseWeight * sizeFactor * 100) / 100;
     const unit_material_rate = getMaterialRate(material_grade, materialsList);
     const machining_cost = Math.round(baseMachining * sizeFactor);
     const raw_material_cost = Math.round(quantity * unit_weight * unit_material_rate * 100) / 100;
     const component_total = Math.round((raw_material_cost + machining_cost) * 100) / 100;
+
+    const resolvedLength = Math.max(50, lengthOverride ?? Math.max(200, length * 0.65));
+    const resolvedWidth = Math.max(50, widthOverride ?? Math.max(80, Math.min(depth || 400, width_diameter * 0.6)));
+    const resolvedThickness = Math.max(3, thicknessOverride ?? (shape === 'pipe' ? 10 : shape === 'round_bar' ? 15 : 8));
+    const resolvedDiameter = diameterOverride ?? (
+      shape === 'round_bar'
+        ? Math.max(20, Math.min(maxDim * 0.04, 100))
+        : shape === 'pipe'
+          ? Math.max(100, width_diameter + 40)
+          : 0
+    );
+    const resolvedWallThickness = shape === 'pipe'
+      ? Math.max(3, Math.min(20, resolvedDiameter * 0.1))
+      : 0;
 
     return {
       id,
@@ -77,6 +95,11 @@ export function getDefaultComponentTemplate(
       component_total,
       rate_source: 'material_default',
       shape,
+      length: Number((resolvedLength).toFixed(1)),
+      width: Number((resolvedWidth).toFixed(1)),
+      thickness: Number((resolvedThickness).toFixed(1)),
+      diameter: Number((resolvedDiameter).toFixed(1)),
+      wall_thickness: Number(resolvedWallThickness.toFixed(1)),
     };
   };
 
