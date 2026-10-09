@@ -17,6 +17,16 @@ class Material(Base):
     is_active = Column(Boolean, default=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+class MaterialRateAudit(Base):
+    __tablename__ = "material_rate_audits"
+
+    id = Column(Integer, primary_key=True, index=True)
+    material_name = Column(String, nullable=False, index=True)
+    previous_rate = Column(Float, nullable=False)
+    new_rate = Column(Float, nullable=False)
+    changed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    changed_by = Column(String, default="Administrator", nullable=False)
+
 class ProcessingRate(Base):
     __tablename__ = "processing_rates"
 
@@ -131,5 +141,16 @@ class QuotationBOMItem(Base):
     cutting_cost = Column(Float, default=0.0, nullable=False)
     machining_cost = Column(Float, default=0.0, nullable=False)
     unit_machining_rate = Column(Float, default=0.0, nullable=False)
+    unit = Column(String, default="piece", nullable=False)
+    unit_weight_override = Column(Float, nullable=True)
+    unit_material_rate = Column(Float, nullable=True)
+    rate_source = Column(String, default="material_default", nullable=False)
+    unit_fabrication_cost = Column(Float, nullable=True)
+    material_rate = Column(Float, default=0.0, nullable=False)
+    fabrication_cost = Column(Float, default=0.0, nullable=False)
+    component_total = Column(Float, default=0.0, nullable=False)
+    is_purchased = Column(Boolean, default=False, nullable=False)
+    unit_purchase_rate = Column(Float, default=0.0, nullable=False)
+    purchase_cost = Column(Float, default=0.0, nullable=False)
 
     quotation = relationship("Quotation", back_populates="bom_items")

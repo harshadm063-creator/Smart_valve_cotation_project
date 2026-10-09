@@ -183,3 +183,11 @@ export async function listActuationPackages(): Promise<ActuationPackage[]> {
   const res = await fetch(`${BASE_URL}/actuation-packages`);
   return res.json();
 }
+
+export async function listMaterialRateAudits(materialName?: string): Promise<any[]> {
+  const params = new URLSearchParams();
+  if (materialName) params.append('material_name', materialName);
+  const res = await fetch(`${BASE_URL}/material-rate-audit?${params.toString()}`);
+  if (!res.ok) throw new Error('Failed to load material rate audits');
+  return res.json();
+}

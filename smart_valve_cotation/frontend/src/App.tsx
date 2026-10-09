@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   FileText,
   UploadCloud,
@@ -13,15 +13,15 @@ import {
   Copy,
   Trash2,
   Search,
-  Filter,
   Sliders,
   Settings,
   ArrowRight,
-  Info,
   Check,
   FileCheck,
   Eye,
-  FileSpreadsheet
+  FileSpreadsheet,
+  RotateCcw,
+  History
 } from 'lucide-react';
 
 import type {
@@ -30,12 +30,16 @@ import type {
   EstimateCalculationResponse,
   QuotationDetail,
   QuotationSummary,
-  ExtractionResponse,
   MaterialItem,
-  ProcessingRateItem,
-  BoughtOutItem,
-  ActuationPackage
+  MaterialRateAudit
 } from './types';
+
+import {
+  EQUIPMENT_OPTIONS,
+  STANDARD_MATERIALS,
+  getDefaultComponentTemplate,
+  getMaterialRate
+} from './templates';
 
 import {
   extractPdfSpecifications,
@@ -50,11 +54,7 @@ import {
   getQuotationPdfUrl,
   listMaterials,
   updateMaterial,
-  listProcessingRates,
-  updateProcessingRate,
-  listBoughtOutItems,
-  createBoughtOutItem,
-  listActuationPackages
+  listMaterialRateAudits
 } from './api';
 
 // Currency formatter
@@ -89,43 +89,47 @@ export default function App() {
   // New quotation input mode: 'pdf' or 'manual'
   const [inputMode, setInputMode] = useState<'pdf' | 'manual'>('manual');
   const [pdfFile, setPdfFile] = useState<File | null>(null);
-  const [extractionResult, setExtractionResult] = useState<ExtractionResponse | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
 
+  // Admin state
+  const [materials, setMaterials] = useState<MaterialItem[]>(STANDARD_MATERIALS);
+  const [materialAudits, setMaterialAudits] = useState<MaterialRateAudit[]>([]);
+
+  // Equipment switch confirmation modal state
+  const [pendingEquipmentType, setPendingEquipmentType] = useState<string | null>(null);
+  const [showSwitchModal, setShowSwitchModal] = useState(false);
+
   // Active Equipment Configuration state
-  const [currentConfig, setCurrentConfig] = useState<EquipmentConfig>({
-    customer_name: 'National Thermal Power Corporation',
-    contact_person: 'Mr. Rajesh Sharma',
-    email: 'rsharma@ntpc.co.in',
-    phone: '+91 98765 43210',
-    project_name: 'Supercritical Thermal FGD Unit',
-    rfq_number: 'RFQ-NTPC-FGD-2026-904',
-    delivery_location: 'Ramagundam Site, Telangana',
-    equipment_type: 'Rack & Pinion Damper',
-    tag_number: 'DMP-FGD-ISOL-01',
-    quantity: 1,
-    length: 1600,
-    width_diameter: 1400,
-    depth: 450,
-    body_material: 'IS 2062',
-    flap_disc_material: 'SS 304 L',
-    actuation_type: 'Pneumatic',
-    remarks: 'Flue gas application with graphite packing and metallic seats.',
-    tax_percent: 18,
-    margin_percent: 15,
-    status: 'Draft',
-    custom_bom: []
+  const [currentConfig, setCurrentConfig] = useState<EquipmentConfig>(() => {
+    const initialDims = { length: 1600, width_diameter: 1400, depth: 450 };
+    return {
+      customer_name: 'National Thermal Power Corporation',
+      contact_person: 'Mr. Rajesh Sharma',
+      email: 'rsharma@ntpc.co.in',
+      phone: '+91 98765 43210',
+      project_name: 'Supercritical Thermal FGD Unit',
+      rfq_number: 'RFQ-NTPC-FGD-2026-904',
+      delivery_location: 'Ramagundam Site, Telangana',
+      equipment_type: 'Rack & Pinion Damper',
+      tag_number: 'DMP-FGD-ISOL-01',
+      quantity: 1,
+      length: initialDims.length,
+      width_diameter: initialDims.width_diameter,
+      depth: initialDims.depth,
+      body_material: 'IS 2062',
+      flap_disc_material: 'SS 304 L',
+      actuation_type: 'Pneumatic',
+      remarks: 'Flue gas application with graphite packing and metallic seats.',
+      tax_percent: 18,
+      margin_percent: 15,
+      status: 'Draft',
+      custom_bom: getDefaultComponentTemplate('Rack & Pinion Damper', initialDims, STANDARD_MATERIALS)
+    };
   });
 
   // Active calculation / estimate details
   const [estimateResult, setEstimateResult] = useState<EstimateCalculationResponse | null>(null);
   const [savedQuoteDetail, setSavedQuoteDetail] = useState<QuotationDetail | null>(null);
-
-  // Admin state
-  const [materials, setMaterials] = useState<MaterialItem[]>([]);
-  const [procRates, setProcRates] = useState<ProcessingRateItem[]>([]);
-  const [boughtOutItems, setBoughtOutItems] = useState<BoughtOutItem[]>([]);
-  const [actuationPackages, setActuationPackages] = useState<ActuationPackage[]>([]);
 
   // Load initial options & dashboard quotations
   useEffect(() => {
@@ -135,8 +139,14 @@ export default function App() {
   async function loadInitialData() {
     try {
       setLoading(true);
-      const quoteList = await listEstimates();
+      const [quoteList, matsList] = await Promise.all([
+        listEstimates().catch(() => []),
+        listMaterials().catch(() => STANDARD_MATERIALS)
+      ]);
       setQuotations(quoteList);
+      if (matsList && matsList.length > 0) {
+        setMaterials(matsList);
+      }
     } catch (err: any) {
       console.error(err);
       setErrorMsg(err.message || 'Failed to initialize app');
@@ -165,6 +175,251 @@ export default function App() {
     }
   }
 
+  // Helper to check if current BOM differs from default template
+  function isBOMModified(type: string, bom: BOMItem[] = []): boolean {
+    const defaultTemplate = getDefaultComponentTemplate(type, {
+      length: currentConfig.length,
+      width_diameter: currentConfig.width_diameter,
+      depth: currentConfig.depth
+    }, materials);
+    if (bom.length !== defaultTemplate.length) return true;
+    for (let i = 0; i < bom.length; i++) {
+      if (bom[i].part_name !== defaultTemplate[i].part_name) return true;
+      if (bom[i].quantity !== defaultTemplate[i].quantity) return true;
+      if (bom[i].material_grade !== defaultTemplate[i].material_grade) return true;
+      if (bom[i].rate_source === 'custom') return true;
+    }
+    return false;
+  }
+
+  // Equipment Type Selection Handler with Confirmation Modal
+  function handleEquipmentTypeChangeRequest(newType: string) {
+    if (newType === currentConfig.equipment_type) return;
+    const modified = isBOMModified(currentConfig.equipment_type, currentConfig.custom_bom || []);
+    if (modified) {
+      setPendingEquipmentType(newType);
+      setShowSwitchModal(true);
+    } else {
+      applyEquipmentTypeSwitch(newType, true);
+    }
+  }
+
+  function applyEquipmentTypeSwitch(newType: string, loadTemplate: boolean) {
+    let newBOM = currentConfig.custom_bom || [];
+    if (loadTemplate) {
+      newBOM = getDefaultComponentTemplate(newType, {
+        length: currentConfig.length,
+        width_diameter: currentConfig.width_diameter,
+        depth: currentConfig.depth
+      }, materials);
+    }
+
+    const updated = {
+      ...currentConfig,
+      equipment_type: newType,
+      custom_bom: newBOM
+    };
+    setCurrentConfig(updated);
+    setShowSwitchModal(false);
+    setPendingEquipmentType(null);
+
+    // Recalculate preview
+    calculateEstimatePreview(updated)
+      .then(res => setEstimateResult(res))
+      .catch(() => {});
+
+    showToast(`Loaded ${newType} with ${newBOM.length} component template.`);
+  }
+
+  // --- Live Calculation for individual BOM item change ---
+  function updateBOMItemField(index: number, field: keyof BOMItem, value: any) {
+    const updatedBom = [...(currentConfig.custom_bom || [])];
+    const item = { ...updatedBom[index], [field]: value };
+
+    // Auto-update material rate if material grade was changed
+    if (field === 'material_grade') {
+      const dbRate = getMaterialRate(value, materials);
+      item.unit_material_rate = dbRate;
+      item.rate_source = 'material_default';
+    }
+
+    // Flag as custom rate if rate was explicitly typed
+    if (field === 'unit_material_rate') {
+      const numVal = Math.max(0, parseFloat(value) || 0);
+      item.unit_material_rate = numVal;
+      const dbRate = getMaterialRate(item.material_grade, materials);
+      item.rate_source = numVal === dbRate ? 'material_default' : 'custom';
+    }
+
+    // Live calculation formula
+    const qty = Math.max(1, parseInt(item.quantity as any) || 1);
+    const uWt = Math.max(0, parseFloat(item.unit_weight as any) || 0);
+    const mRate = Math.max(0, parseFloat(item.unit_material_rate as any) || 0);
+    const machCost = Math.max(0, parseFloat(item.machining_cost as any) || 0);
+
+    const rawCost = Math.round(qty * uWt * mRate * 100) / 100;
+    const compTotal = Math.round((rawCost + machCost) * 100) / 100;
+
+    item.quantity = qty;
+    item.unit_weight = uWt;
+    item.raw_material_cost = rawCost;
+    item.machining_cost = machCost;
+    item.component_total = compTotal;
+
+    updatedBom[index] = item;
+
+    const updatedConfig = { ...currentConfig, custom_bom: updatedBom };
+    setCurrentConfig(updatedConfig);
+
+    // Trigger preview calculation in background
+    calculateEstimatePreview(updatedConfig)
+      .then(res => setEstimateResult(res))
+      .catch(() => {});
+  }
+
+  // Add Custom Component
+  function handleAddComponent() {
+    const currentList = currentConfig.custom_bom || [];
+    const defaultMat = currentConfig.body_material || 'IS 2062';
+    const dbRate = getMaterialRate(defaultMat, materials);
+
+    const newItem: BOMItem = {
+      id: currentList.length + 1,
+      part_name: `Custom Part ${currentList.length + 1}`,
+      category: 'Auxiliary Trim',
+      material_grade: defaultMat,
+      quantity: 1,
+      unit: 'piece',
+      unit_weight: 5.0,
+      unit_material_rate: dbRate,
+      machining_cost: 250,
+      raw_material_cost: 5.0 * dbRate,
+      component_total: 5.0 * dbRate + 250,
+      rate_source: 'material_default',
+      shape: 'plate',
+      length: 200,
+      width: 100,
+      thickness: 10,
+      diameter: 0,
+      wall_thickness: 0
+    };
+
+    const updatedBom = [...currentList, newItem];
+    const updatedConfig = { ...currentConfig, custom_bom: updatedBom };
+    setCurrentConfig(updatedConfig);
+    calculateEstimatePreview(updatedConfig)
+      .then(res => setEstimateResult(res))
+      .catch(() => {});
+
+    showToast(`Added new component "${newItem.part_name}".`);
+  }
+
+  // Duplicate Component
+  function handleDuplicateComponent(index: number) {
+    const currentList = currentConfig.custom_bom || [];
+    const target = currentList[index];
+    if (!target) return;
+
+    const dupItem: BOMItem = {
+      ...target,
+      id: currentList.length + 1,
+      part_name: `${target.part_name} (Copy)`
+    };
+
+    const updatedBom = [...currentList.slice(0, index + 1), dupItem, ...currentList.slice(index + 1)];
+    const updatedConfig = { ...currentConfig, custom_bom: updatedBom };
+    setCurrentConfig(updatedConfig);
+    calculateEstimatePreview(updatedConfig)
+      .then(res => setEstimateResult(res))
+      .catch(() => {});
+
+    showToast(`Duplicated component "${target.part_name}".`);
+  }
+
+  // Remove Component
+  function handleRemoveComponent(index: number) {
+    const currentList = currentConfig.custom_bom || [];
+    if (currentList.length <= 1) {
+      showToast('A minimum of 1 component is required in the Bill of Materials.', true);
+      return;
+    }
+    const removedName = currentList[index]?.part_name || 'Component';
+    const updatedBom = currentList.filter((_, i) => i !== index);
+    const updatedConfig = { ...currentConfig, custom_bom: updatedBom };
+    setCurrentConfig(updatedConfig);
+    calculateEstimatePreview(updatedConfig)
+      .then(res => setEstimateResult(res))
+      .catch(() => {});
+
+    showToast(`Removed "${removedName}".`);
+  }
+
+  // Reset to Default Template
+  function handleResetTemplate() {
+    const template = getDefaultComponentTemplate(currentConfig.equipment_type, {
+      length: currentConfig.length,
+      width_diameter: currentConfig.width_diameter,
+      depth: currentConfig.depth
+    }, materials);
+
+    const updatedConfig = { ...currentConfig, custom_bom: template };
+    setCurrentConfig(updatedConfig);
+    calculateEstimatePreview(updatedConfig)
+      .then(res => setEstimateResult(res))
+      .catch(() => {});
+
+    showToast(`Reset ${currentConfig.equipment_type} to default engineering template.`);
+  }
+
+  // --- Live Cost Summary Metrics Computed on Client ---
+  const bomMetrics = useMemo(() => {
+    const items = currentConfig.custom_bom || [];
+    let totalItemsCount = items.length;
+    let totalQty = 0;
+    let totalWeight = 0;
+    let totalRawMaterialCost = 0;
+    let totalMachiningFabCost = 0;
+    let totalBOMCost = 0;
+
+    items.forEach(item => {
+      const q = item.quantity || 1;
+      const uWt = item.unit_weight || 0;
+      const mRate = item.unit_material_rate || 0;
+      const mach = item.machining_cost || 0;
+
+      const raw = q * uWt * mRate;
+      const compTotal = raw + mach;
+
+      totalQty += q;
+      totalWeight += q * uWt;
+      totalRawMaterialCost += raw;
+      totalMachiningFabCost += mach;
+      totalBOMCost += compTotal;
+    });
+
+    const qtyMultiplier = currentConfig.quantity || 1;
+    const subtotal = totalBOMCost * qtyMultiplier;
+    const marginPct = currentConfig.margin_percent || 0;
+    const marginAmt = subtotal * (marginPct / 100);
+    const taxable = subtotal + marginAmt;
+    const taxPct = currentConfig.tax_percent || 0;
+    const taxAmt = taxable * (taxPct / 100);
+    const finalAmount = taxable + taxAmt;
+
+    return {
+      totalItemsCount,
+      totalQty,
+      totalWeight: Math.round(totalWeight * 100) / 100,
+      totalRawMaterialCost: Math.round(totalRawMaterialCost * 100) / 100,
+      totalMachiningFabCost: Math.round(totalMachiningFabCost * 100) / 100,
+      totalBOMCost: Math.round(totalBOMCost * 100) / 100,
+      subtotal: Math.round(subtotal * 100) / 100,
+      marginAmt: Math.round(marginAmt * 100) / 100,
+      taxAmt: Math.round(taxAmt * 100) / 100,
+      finalAmount: Math.round(finalAmount * 100) / 100
+    };
+  }, [currentConfig]);
+
   // --- PDF Import & Extraction Workflow ---
   async function handleFileUpload(file: File) {
     setPdfFile(file);
@@ -172,26 +427,31 @@ export default function App() {
     setErrorMsg(null);
     try {
       const result = await extractPdfSpecifications(file);
-      setExtractionResult(result);
-      
-      // Auto-populate detected fields into currentConfig
       const fields = result.extracted_fields;
+      const eqType = fields.equipment_type?.value || currentConfig.equipment_type;
+      const l = fields.length?.value ? Number(fields.length.value) : currentConfig.length;
+      const w = fields.width_diameter?.value ? Number(fields.width_diameter.value) : currentConfig.width_diameter;
+      const d = fields.depth?.value ? Number(fields.depth.value) : currentConfig.depth;
+
+      const template = getDefaultComponentTemplate(eqType, { length: l, width_diameter: w, depth: d }, materials);
+
       setCurrentConfig(prev => ({
         ...prev,
         customer_name: fields.customer_name?.value || prev.customer_name,
         rfq_number: fields.rfq_number?.value || prev.rfq_number,
-        equipment_type: fields.equipment_type?.value || prev.equipment_type,
+        equipment_type: eqType,
         tag_number: fields.tag_number?.value || prev.tag_number,
         quantity: fields.quantity?.value ? Number(fields.quantity.value) : prev.quantity,
-        length: fields.length?.value ? Number(fields.length.value) : prev.length,
-        width_diameter: fields.width_diameter?.value ? Number(fields.width_diameter.value) : prev.width_diameter,
-        depth: fields.depth?.value ? Number(fields.depth.value) : prev.depth,
+        length: l,
+        width_diameter: w,
+        depth: d,
         body_material: fields.body_material?.value || prev.body_material,
         flap_disc_material: fields.flap_disc_material?.value || prev.flap_disc_material,
         actuation_type: fields.actuation_type?.value || prev.actuation_type,
+        custom_bom: template
       }));
 
-      showToast(`Successfully parsed "${file.name}". Please verify extracted parameters below.`);
+      showToast(`Successfully parsed "${file.name}". Auto-loaded template for ${eqType}.`);
     } catch (err: any) {
       showToast(err.message || 'Failed to parse technical specification PDF', true);
     } finally {
@@ -213,9 +473,8 @@ export default function App() {
     }
   }
 
-  // --- Calculation & BOM Generation ---
+  // --- Calculation & Proceed to BOM / Results ---
   async function handleProceedToBOM() {
-    // Validate required dimensions
     if (!currentConfig.length || currentConfig.length < 100) {
       showToast('Please enter a valid length (minimum 100 mm)', true);
       return;
@@ -233,25 +492,12 @@ export default function App() {
       setLoading(true);
       const res = await calculateEstimatePreview(currentConfig);
       setEstimateResult(res);
-      setCurrentConfig(prev => ({ ...prev, custom_bom: res.bom_items }));
       setActiveTab('bom_editor');
-      showToast('Standard Bill of Materials generated according to engineering rules.');
+      showToast('Bill of Materials loaded and validated with centralized cost engine.');
     } catch (err: any) {
       showToast(err.message || 'Error generating BOM', true);
     } finally {
       setLoading(false);
-    }
-  }
-
-  // --- Real-time Recalculate BOM changes ---
-  async function handleRecalculateBOM(updatedBom: BOMItem[]) {
-    try {
-      const updatedConfig = { ...currentConfig, custom_bom: updatedBom };
-      setCurrentConfig(updatedConfig);
-      const res = await calculateEstimatePreview(updatedConfig);
-      setEstimateResult(res);
-    } catch (err: any) {
-      showToast(err.message || 'Recalculation error', true);
     }
   }
 
@@ -261,10 +507,10 @@ export default function App() {
       setLoading(true);
       const payload = {
         ...currentConfig,
-        custom_bom: estimateResult?.bom_items || currentConfig.custom_bom,
+        custom_bom: currentConfig.custom_bom || estimateResult?.bom_items,
         status: status
       };
-      
+
       let saved: QuotationDetail;
       if (savedQuoteDetail && savedQuoteDetail.id) {
         saved = await updateEstimate(savedQuoteDetail.id, payload);
@@ -311,7 +557,6 @@ export default function App() {
         status: detail.status,
         custom_bom: detail.bom_items
       });
-      // Run preview calculation
       const res = await calculateEstimatePreview({
         ...detail,
         custom_bom: detail.bom_items,
@@ -374,16 +619,12 @@ export default function App() {
   async function loadAdminData() {
     try {
       setLoading(true);
-      const [mats, prs, bo, acts] = await Promise.all([
-        listMaterials(),
-        listProcessingRates(),
-        listBoughtOutItems(),
-        listActuationPackages()
+      const [mats, audits] = await Promise.all([
+        listMaterials().catch(() => STANDARD_MATERIALS),
+        listMaterialRateAudits().catch(() => [])
       ]);
       setMaterials(mats);
-      setProcRates(prs);
-      setBoughtOutItems(bo);
-      setActuationPackages(acts);
+      setMaterialAudits(audits);
     } catch (err: any) {
       showToast(err.message || 'Failed to load pricing database', true);
     } finally {
@@ -446,33 +687,39 @@ export default function App() {
               <span>Create New Quotation</span>
             </button>
 
-            {estimateResult && (
-              <>
-                <button
-                  onClick={() => setActiveTab('bom_editor')}
-                  className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg transition-colors ${
-                    activeTab === 'bom_editor'
-                      ? 'bg-amber-500 text-slate-950 font-semibold shadow-sm'
-                      : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                  }`}
-                >
-                  <FileSpreadsheet className="h-4 w-4" />
-                  <span>BOM & Weight Editor</span>
-                </button>
+            <button
+              onClick={() => {
+                if (!estimateResult && currentConfig.custom_bom) {
+                  calculateEstimatePreview(currentConfig).then(res => setEstimateResult(res));
+                }
+                setActiveTab('bom_editor');
+              }}
+              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg transition-colors ${
+                activeTab === 'bom_editor'
+                  ? 'bg-amber-500 text-slate-950 font-semibold shadow-sm'
+                  : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+              }`}
+            >
+              <FileSpreadsheet className="h-4 w-4" />
+              <span>BOM & Component Editor</span>
+            </button>
 
-                <button
-                  onClick={() => setActiveTab('results')}
-                  className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg transition-colors ${
-                    activeTab === 'results'
-                      ? 'bg-amber-500 text-slate-950 font-semibold shadow-sm'
-                      : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                  }`}
-                >
-                  <DollarSign className="h-4 w-4" />
-                  <span>Cost Estimation</span>
-                </button>
-              </>
-            )}
+            <button
+              onClick={() => {
+                if (!estimateResult && currentConfig.custom_bom) {
+                  calculateEstimatePreview(currentConfig).then(res => setEstimateResult(res));
+                }
+                setActiveTab('results');
+              }}
+              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg transition-colors ${
+                activeTab === 'results'
+                  ? 'bg-amber-500 text-slate-950 font-semibold shadow-sm'
+                  : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+              }`}
+            >
+              <DollarSign className="h-4 w-4" />
+              <span>Cost Estimation</span>
+            </button>
 
             {savedQuoteDetail && (
               <button
@@ -525,14 +772,14 @@ export default function App() {
           <div className="flex items-center justify-between">
             <span className="flex items-center space-x-2">
               <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span className="text-slate-300">Engine Online</span>
+              <span className="text-slate-300">Dynamic Engine Active</span>
             </span>
             <span className="bg-slate-800 text-slate-300 px-2 py-0.5 rounded text-[10px]">
-              v1.0.0
+              v2.0
             </span>
           </div>
           <p className="text-[11px] text-slate-400">
-            Compliant with ASME & AMCA engineering estimation standards.
+            Compliant with ASME & AMCA dynamic estimation standards.
           </p>
         </div>
       </aside>
@@ -545,7 +792,7 @@ export default function App() {
             <span className="font-medium text-slate-800">Smart Valve</span>
             <span>/</span>
             <span className="capitalize font-semibold text-amber-600">
-              {activeTab === 'new' ? 'New Quotation Setup' : activeTab.replace('_', ' ')}
+              {activeTab === 'new' ? 'Dynamic Quotation Configuration' : activeTab.replace('_', ' ')}
             </span>
           </div>
 
@@ -580,6 +827,48 @@ export default function App() {
               <span>{successMsg}</span>
             </div>
             <button onClick={() => setSuccessMsg(null)} className="text-emerald-500 hover:text-emerald-700 text-xs font-bold">✕</button>
+          </div>
+        )}
+
+        {/* EQUIPMENT TYPE SWITCH CONFIRMATION MODAL */}
+        {showSwitchModal && pendingEquipmentType && (
+          <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-4">
+              <div className="flex items-center space-x-3 text-amber-600">
+                <AlertTriangle className="h-6 w-6" />
+                <h3 className="font-bold text-base text-slate-900">Switch Equipment Type?</h3>
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                You have modified components in your current <strong>{currentConfig.equipment_type}</strong> configuration.
+                Switching to <strong>{pendingEquipmentType}</strong> will load its default component template.
+              </p>
+              <div className="flex items-center justify-end space-x-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowSwitchModal(false);
+                    setPendingEquipmentType(null);
+                  }}
+                  className="px-3 py-1.5 border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-semibold"
+                >
+                  Cancel (Keep Current)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyEquipmentTypeSwitch(pendingEquipmentType, false)}
+                  className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-lg text-xs font-semibold"
+                >
+                  Keep Custom Components
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyEquipmentTypeSwitch(pendingEquipmentType, true)}
+                  className="px-4 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-lg text-xs"
+                >
+                  Load {pendingEquipmentType} Template
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
@@ -637,7 +926,7 @@ export default function App() {
                   <p className="text-xs text-slate-500">Live estimates generated from the centralized cost database</p>
                 </div>
 
-                <div className="flex items-center space-x-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <div className="relative">
                     <Search className="h-3.5 w-3.5 absolute left-3 top-2.5 text-slate-400" />
                     <input
@@ -646,9 +935,33 @@ export default function App() {
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
                       onKeyDown={(e) => e.key === 'Enter' && refreshQuotations()}
-                      className="pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500 w-52"
+                      className="pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500 w-48"
                     />
                   </div>
+                  <select
+                    value={filterType}
+                    onChange={(e) => {
+                      setFilterType(e.target.value);
+                      listEstimates(searchQuery, e.target.value, filterStatus).then(setQuotations).catch(() => {});
+                    }}
+                    className="py-1.5 px-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500 text-slate-700"
+                  >
+                    <option value="">All Equipment</option>
+                    {EQUIPMENT_OPTIONS.map(opt => <option key={opt.id} value={opt.label}>{opt.label}</option>)}
+                  </select>
+                  <select
+                    value={filterStatus}
+                    onChange={(e) => {
+                      setFilterStatus(e.target.value);
+                      listEstimates(searchQuery, filterType, e.target.value).then(setQuotations).catch(() => {});
+                    }}
+                    className="py-1.5 px-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-amber-500 text-slate-700"
+                  >
+                    <option value="">All Statuses</option>
+                    <option value="Draft">Draft</option>
+                    <option value="Validated">Validated</option>
+                    <option value="Issued">Issued</option>
+                  </select>
                   <button
                     onClick={refreshQuotations}
                     className="p-1.5 border border-slate-200 hover:bg-slate-50 rounded-lg text-slate-600"
@@ -752,26 +1065,19 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 2: NEW QUOTATION (Option A: PDF Import, Option B: Manual) */}
+        {/* TAB 2: NEW QUOTATION WITH DYNAMIC COMPONENT CONFIGURATION */}
         {activeTab === 'new' && (
-          <div className="p-6 max-w-5xl mx-auto w-full space-y-6">
+          <div className="p-6 max-w-6xl mx-auto w-full space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between pb-2 border-b border-slate-200 gap-2">
               <div>
-                <h2 className="text-xl font-bold text-slate-900">Create New Quotation</h2>
-                <p className="text-xs text-slate-500">Configure equipment specifications to generate verified BOM and manufacturing cost.</p>
+                <h2 className="text-xl font-bold text-slate-900">Create Technical Quotation</h2>
+                <p className="text-xs text-slate-500">
+                  Select equipment type to automatically load its engineering component template, customize materials, and calculate costs.
+                </p>
               </div>
 
               {/* Mode Toggle Button */}
               <div className="bg-slate-200 p-1 rounded-lg flex space-x-1 text-xs font-semibold">
-                <button
-                  onClick={() => setInputMode('pdf')}
-                  className={`px-3 py-1.5 rounded-md flex items-center space-x-1.5 transition-all ${
-                    inputMode === 'pdf' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  <UploadCloud className="h-3.5 w-3.5" />
-                  <span>Option A: PDF Import</span>
-                </button>
                 <button
                   onClick={() => setInputMode('manual')}
                   className={`px-3 py-1.5 rounded-md flex items-center space-x-1.5 transition-all ${
@@ -779,12 +1085,21 @@ export default function App() {
                   }`}
                 >
                   <Sliders className="h-3.5 w-3.5" />
-                  <span>Option B: Manual Configuration</span>
+                  <span>Manual Configuration</span>
+                </button>
+                <button
+                  onClick={() => setInputMode('pdf')}
+                  className={`px-3 py-1.5 rounded-md flex items-center space-x-1.5 transition-all ${
+                    inputMode === 'pdf' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <UploadCloud className="h-3.5 w-3.5" />
+                  <span>PDF Import & Parse</span>
                 </button>
               </div>
             </div>
 
-            {/* OPTION A: PDF UPLOADER & EXTRACTION REVIEW */}
+            {/* OPTION A: PDF UPLOADER */}
             {inputMode === 'pdf' && (
               <div className="space-y-4">
                 <div className="bg-white rounded-xl border-2 border-dashed border-slate-300 p-6 text-center hover:border-amber-500 transition-colors">
@@ -793,7 +1108,7 @@ export default function App() {
                     Upload Customer Specification PDF
                   </p>
                   <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
-                    Supports digital specification sheets, equipment data sheets, and RFQ inquiries.
+                    Automatically extracts equipment dimensions, tags, materials, and maps to the appropriate valve or damper template.
                   </p>
 
                   <div className="mt-4 flex flex-wrap items-center justify-center gap-3">
@@ -826,87 +1141,6 @@ export default function App() {
                     </p>
                   )}
                 </div>
-
-                {/* Extraction Results Grid */}
-                {extractionResult && (
-                  <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-4 shadow-xs">
-                    <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-                      <div>
-                        <h3 className="text-sm font-bold text-slate-900 flex items-center space-x-2">
-                          <FileCheck className="h-4 w-4 text-emerald-600" />
-                          <span>Extracted Specifications Review</span>
-                        </h3>
-                        <p className="text-xs text-slate-500">
-                          Verify extracted values below. Never assume unverified fields without checking.
-                        </p>
-                      </div>
-                      <span className="text-[11px] bg-slate-100 text-slate-700 px-2.5 py-1 rounded-full font-medium">
-                        Document Pages: {extractionResult.total_pages}
-                      </span>
-                    </div>
-
-                    {/* Extracted Fields Table */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                      {Object.entries(extractionResult.extracted_fields).map(([key, field]) => (
-                        <div key={key} className="p-3 rounded-lg border border-slate-100 bg-slate-50/60 flex flex-col justify-between">
-                          <div className="flex items-center justify-between">
-                            <span className="font-semibold text-slate-700">{field.label}</span>
-                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                              field.status === 'verified' ? 'bg-emerald-100 text-emerald-800' :
-                              field.status === 'uncertain' ? 'bg-amber-100 text-amber-800' :
-                              'bg-slate-200 text-slate-600'
-                            }`}>
-                              {field.status} ({(field.confidence * 100).toFixed(0)}%)
-                            </span>
-                          </div>
-
-                          <div className="mt-2">
-                            <input
-                              type="text"
-                              value={field.value ?? ''}
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                setExtractionResult(prev => prev ? ({
-                                  ...prev,
-                                  extracted_fields: {
-                                    ...prev.extracted_fields,
-                                    [key]: { ...field, value: val }
-                                  }
-                                }) : null);
-                                setCurrentConfig(prev => ({ ...prev, [key]: val }));
-                              }}
-                              className="w-full text-xs font-semibold text-slate-900 bg-white border border-slate-200 rounded px-2.5 py-1.5 focus:ring-1 focus:ring-amber-500"
-                            />
-                          </div>
-
-                          {field.source_snippet && (
-                            <p className="mt-1 text-[10px] text-slate-400 truncate" title={field.source_snippet}>
-                              Snippet: "{field.source_snippet}"
-                            </p>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* Additional Extracted Information (pressure, temp, fluid) */}
-                    {extractionResult.additional_information.length > 0 && (
-                      <div className="bg-amber-50/60 border border-amber-200 rounded-lg p-3 text-xs">
-                        <h4 className="font-bold text-amber-900 mb-1 flex items-center space-x-1.5">
-                          <Info className="h-3.5 w-3.5 text-amber-700" />
-                          <span>Additional Engineering Specifications Detected:</span>
-                        </h4>
-                        <div className="grid grid-cols-2 gap-2 mt-2">
-                          {extractionResult.additional_information.map((item, idx) => (
-                            <div key={idx} className="bg-white/80 p-2 rounded border border-amber-200/60">
-                              <span className="font-semibold text-slate-700">{item.label}: </span>
-                              <span className="text-slate-900">{item.value}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
             )}
 
@@ -925,7 +1159,7 @@ export default function App() {
                       value={currentConfig.customer_name}
                       onChange={(e) => setCurrentConfig({ ...currentConfig, customer_name: e.target.value })}
                       className="w-full border border-slate-300 rounded-lg p-2 focus:ring-1 focus:ring-amber-500"
-                      placeholder="e.g. NTPC Ltd"
+                      placeholder="e.g. National Thermal Power Corporation"
                     />
                   </div>
 
@@ -936,7 +1170,7 @@ export default function App() {
                       value={currentConfig.contact_person || ''}
                       onChange={(e) => setCurrentConfig({ ...currentConfig, contact_person: e.target.value })}
                       className="w-full border border-slate-300 rounded-lg p-2 focus:ring-1 focus:ring-amber-500"
-                      placeholder="e.g. Chief Engineer"
+                      placeholder="e.g. Mr. Rajesh Sharma"
                     />
                   </div>
 
@@ -947,7 +1181,7 @@ export default function App() {
                       value={currentConfig.email || ''}
                       onChange={(e) => setCurrentConfig({ ...currentConfig, email: e.target.value })}
                       className="w-full border border-slate-300 rounded-lg p-2 focus:ring-1 focus:ring-amber-500"
-                      placeholder="e.g. engineer@client.com"
+                      placeholder="e.g. rsharma@client.com"
                     />
                   </div>
 
@@ -958,7 +1192,7 @@ export default function App() {
                       value={currentConfig.project_name || ''}
                       onChange={(e) => setCurrentConfig({ ...currentConfig, project_name: e.target.value })}
                       className="w-full border border-slate-300 rounded-lg p-2 focus:ring-1 focus:ring-amber-500"
-                      placeholder="e.g. FGD Unit 2"
+                      placeholder="e.g. Supercritical Thermal FGD Unit"
                     />
                   </div>
 
@@ -969,7 +1203,7 @@ export default function App() {
                       value={currentConfig.rfq_number || ''}
                       onChange={(e) => setCurrentConfig({ ...currentConfig, rfq_number: e.target.value })}
                       className="w-full border border-slate-300 rounded-lg p-2 focus:ring-1 focus:ring-amber-500"
-                      placeholder="e.g. RFQ-2026-904"
+                      placeholder="e.g. RFQ-NTPC-FGD-2026-904"
                     />
                   </div>
 
@@ -980,13 +1214,13 @@ export default function App() {
                       value={currentConfig.delivery_location || ''}
                       onChange={(e) => setCurrentConfig({ ...currentConfig, delivery_location: e.target.value })}
                       className="w-full border border-slate-300 rounded-lg p-2 focus:ring-1 focus:ring-amber-500"
-                      placeholder="e.g. Ramagundam Site"
+                      placeholder="e.g. Ramagundam Site, Telangana"
                     />
                   </div>
                 </div>
               </div>
 
-              {/* Section 2: Equipment Configuration */}
+              {/* Section 2: Technical Parameters */}
               <div>
                 <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider mb-3 pb-1 border-b border-slate-100">
                   2. Technical Equipment Parameters
@@ -996,12 +1230,23 @@ export default function App() {
                     <label className="block font-semibold text-slate-700 mb-1">Equipment Type *</label>
                     <select
                       value={currentConfig.equipment_type}
-                      onChange={(e) => setCurrentConfig({ ...currentConfig, equipment_type: e.target.value })}
-                      className="w-full border border-slate-300 rounded-lg p-2 font-medium bg-white focus:ring-1 focus:ring-amber-500"
+                      onChange={(e) => handleEquipmentTypeChangeRequest(e.target.value)}
+                      className="w-full border border-slate-300 rounded-lg p-2 font-bold text-amber-900 bg-amber-50/50 focus:ring-1 focus:ring-amber-500 cursor-pointer"
                     >
-                      <option value="Rack & Pinion Damper">Rack & Pinion Damper</option>
-                      <option value="Butterfly Valve">Butterfly Valve</option>
+                      <optgroup label="Industrial Valves">
+                        {EQUIPMENT_OPTIONS.filter(o => o.category === 'Valves').map(o => (
+                          <option key={o.id} value={o.id}>{o.label}</option>
+                        ))}
+                      </optgroup>
+                      <optgroup label="Heavy Duty Dampers">
+                        {EQUIPMENT_OPTIONS.filter(o => o.category === 'Dampers').map(o => (
+                          <option key={o.id} value={o.id}>{o.label}</option>
+                        ))}
+                      </optgroup>
                     </select>
+                    <span className="text-[10px] text-slate-500 mt-1 block">
+                      {EQUIPMENT_OPTIONS.find(o => o.id === currentConfig.equipment_type)?.description}
+                    </span>
                   </div>
 
                   <div>
@@ -1011,7 +1256,7 @@ export default function App() {
                       value={currentConfig.tag_number || ''}
                       onChange={(e) => setCurrentConfig({ ...currentConfig, tag_number: e.target.value })}
                       className="w-full border border-slate-300 rounded-lg p-2 focus:ring-1 focus:ring-amber-500"
-                      placeholder="e.g. DMP-FGD-01"
+                      placeholder="e.g. DMP-FGD-ISOL-01"
                     />
                   </div>
 
@@ -1022,7 +1267,7 @@ export default function App() {
                       min="1"
                       value={currentConfig.quantity}
                       onChange={(e) => setCurrentConfig({ ...currentConfig, quantity: Math.max(1, parseInt(e.target.value) || 1) })}
-                      className="w-full border border-slate-300 rounded-lg p-2 focus:ring-1 focus:ring-amber-500"
+                      className="w-full border border-slate-300 rounded-lg p-2 focus:ring-1 focus:ring-amber-500 font-bold"
                     />
                   </div>
                 </div>
@@ -1041,7 +1286,7 @@ export default function App() {
                       onChange={(e) => setCurrentConfig({ ...currentConfig, length: parseFloat(e.target.value) || 0 })}
                       className="w-full border border-slate-300 rounded-lg p-2 font-mono font-medium focus:ring-1 focus:ring-amber-500 bg-white"
                     />
-                    <span className="text-[10px] text-slate-400 mt-0.5 block">Valid range: 300 - 10000 mm</span>
+                    <span className="text-[10px] text-slate-400 mt-0.5 block">Valid range: 100 - 10000 mm</span>
                   </div>
 
                   <div>
@@ -1056,7 +1301,7 @@ export default function App() {
                       onChange={(e) => setCurrentConfig({ ...currentConfig, width_diameter: parseFloat(e.target.value) || 0 })}
                       className="w-full border border-slate-300 rounded-lg p-2 font-mono font-medium focus:ring-1 focus:ring-amber-500 bg-white"
                     />
-                    <span className="text-[10px] text-slate-400 mt-0.5 block">Valid range: 300 - 10000 mm</span>
+                    <span className="text-[10px] text-slate-400 mt-0.5 block">Valid range: 100 - 10000 mm</span>
                   </div>
 
                   <div>
@@ -1071,39 +1316,35 @@ export default function App() {
                       onChange={(e) => setCurrentConfig({ ...currentConfig, depth: parseFloat(e.target.value) || 0 })}
                       className="w-full border border-slate-300 rounded-lg p-2 font-mono font-medium focus:ring-1 focus:ring-amber-500 bg-white"
                     />
-                    <span className="text-[10px] text-slate-400 mt-0.5 block">Valid range: 100 - 2000 mm</span>
+                    <span className="text-[10px] text-slate-400 mt-0.5 block">Valid range: 50 - 2000 mm</span>
                   </div>
                 </div>
 
-                {/* Materials and Actuation */}
+                {/* Materials and Actuation defaults */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4 text-xs">
                   <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Body / Shell Material *</label>
+                    <label className="block font-semibold text-slate-700 mb-1">Default Body Material</label>
                     <select
                       value={currentConfig.body_material}
                       onChange={(e) => setCurrentConfig({ ...currentConfig, body_material: e.target.value })}
                       className="w-full border border-slate-300 rounded-lg p-2 bg-white focus:ring-1 focus:ring-amber-500"
                     >
-                      <option value="IS 2062">IS 2062 (Carbon Steel - ₹72/kg)</option>
-                      <option value="SS 304 L">SS 304 L (Stainless Steel - ₹250/kg)</option>
-                      <option value="SS 316 L">SS 316 L (Austenitic - ₹310/kg)</option>
-                      <option value="SS 410">SS 410 (Martensitic - ₹120/kg)</option>
-                      <option value="EN8">EN8 (Medium Carbon Steel - ₹95/kg)</option>
+                      {materials.map(m => (
+                        <option key={m.name} value={m.name}>{m.name} (₹{m.raw_rate}/kg)</option>
+                      ))}
                     </select>
                   </div>
 
                   <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Flap / Disc Material *</label>
+                    <label className="block font-semibold text-slate-700 mb-1">Default Disc/Blade Material</label>
                     <select
                       value={currentConfig.flap_disc_material}
                       onChange={(e) => setCurrentConfig({ ...currentConfig, flap_disc_material: e.target.value })}
                       className="w-full border border-slate-300 rounded-lg p-2 bg-white focus:ring-1 focus:ring-amber-500"
                     >
-                      <option value="SS 304 L">SS 304 L (Stainless Steel - ₹250/kg)</option>
-                      <option value="SS 316 L">SS 316 L (Austenitic - ₹310/kg)</option>
-                      <option value="IS 2062">IS 2062 (Carbon Steel - ₹72/kg)</option>
-                      <option value="SS 410">SS 410 (Martensitic - ₹120/kg)</option>
-                      <option value="EN8">EN8 (Medium Carbon Steel - ₹95/kg)</option>
+                      {materials.map(m => (
+                        <option key={m.name} value={m.name}>{m.name} (₹{m.raw_rate}/kg)</option>
+                      ))}
                     </select>
                   </div>
 
@@ -1120,16 +1361,280 @@ export default function App() {
                     </select>
                   </div>
                 </div>
+              </div>
 
-                <div className="mt-4 text-xs">
-                  <label className="block font-semibold text-slate-700 mb-1">Special Engineering Remarks</label>
-                  <textarea
-                    rows={2}
-                    value={currentConfig.remarks || ''}
-                    onChange={(e) => setCurrentConfig({ ...currentConfig, remarks: e.target.value })}
-                    className="w-full border border-slate-300 rounded-lg p-2 focus:ring-1 focus:ring-amber-500"
-                    placeholder="Enter special leakage requirements, coating specifications, or warranty terms..."
-                  />
+              {/* Section 3: Dynamic Component Configuration (BOM) */}
+              <div className="pt-2 border-t border-slate-200">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-3 pb-2 gap-2">
+                  <div>
+                    <div className="flex items-center space-x-2">
+                      <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider">
+                        3. Dynamic Component Configuration (BOM)
+                      </h3>
+                      <span className="bg-amber-100 text-amber-900 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase">
+                        {currentConfig.equipment_type} Template
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Edit quantities, material grades, weights, rates, and fabrication charges directly.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center space-x-2">
+                    <button
+                      type="button"
+                      onClick={handleResetTemplate}
+                      className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold px-3 py-1.5 rounded-lg flex items-center space-x-1.5 border border-slate-200 transition-colors"
+                      title="Reset component list to standard template"
+                    >
+                      <RotateCcw className="h-3 w-3 text-slate-500" />
+                      <span>Reset Template</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleAddComponent}
+                      className="bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-bold px-3.5 py-1.5 rounded-lg flex items-center space-x-1.5 shadow-xs transition-colors"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      <span>Add Component</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Interactive Dynamic Component Table */}
+                <div className="overflow-x-auto rounded-xl border border-slate-200 shadow-2xs">
+                  <table className="w-full text-left text-xs bg-white">
+                    <thead className="bg-slate-900 text-white font-semibold text-[11px]">
+                      <tr>
+                        <th className="py-2.5 px-3">#</th>
+                        <th className="py-2.5 px-3 min-w-44">Component Name</th>
+                        <th className="py-2.5 px-3 min-w-36">Material Grade</th>
+                        <th className="py-2.5 px-2 w-16 text-center">Qty</th>
+                        <th className="py-2.5 px-2 w-20">Unit</th>
+                        <th className="py-2.5 px-3 w-28">Unit Wt (kg)</th>
+                        <th className="py-2.5 px-3 w-32">Material Rate (₹/kg)</th>
+                        <th className="py-2.5 px-3 w-32">Machining/Fab (₹)</th>
+                        <th className="py-2.5 px-3 w-32 text-right">Total Cost (₹)</th>
+                        <th className="py-2.5 px-2 w-20 text-center">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {(currentConfig.custom_bom || []).map((item, idx) => {
+                        const rawCost = (item.quantity || 1) * (item.unit_weight || 0) * (item.unit_material_rate || 0);
+                        const compTotal = rawCost + (item.machining_cost || 0);
+                        const isCustomRate = item.rate_source === 'custom';
+
+                        return (
+                          <tr key={idx} className="hover:bg-amber-50/30 transition-colors">
+                            <td className="py-2 px-3 text-slate-400 font-mono">{idx + 1}</td>
+
+                            {/* Component Name */}
+                            <td className="py-2 px-3">
+                              <input
+                                type="text"
+                                value={item.part_name}
+                                onChange={(e) => updateBOMItemField(idx, 'part_name', e.target.value)}
+                                className="w-full font-semibold text-slate-800 bg-transparent border border-transparent hover:border-slate-300 focus:border-amber-500 focus:bg-white rounded px-2 py-1 text-xs"
+                                placeholder="e.g. Housing Plate"
+                              />
+                            </td>
+
+                            {/* Material Grade */}
+                            <td className="py-2 px-3">
+                              <select
+                                value={item.material_grade}
+                                onChange={(e) => updateBOMItemField(idx, 'material_grade', e.target.value)}
+                                className="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs font-medium text-slate-800 focus:ring-1 focus:ring-amber-500"
+                              >
+                                {materials.map(m => (
+                                  <option key={m.name} value={m.name}>
+                                    {m.name} (₹{m.raw_rate}/kg)
+                                  </option>
+                                ))}
+                                {!materials.some(m => m.name === item.material_grade) && (
+                                  <option value={item.material_grade}>{item.material_grade} (Custom)</option>
+                                )}
+                              </select>
+                            </td>
+
+                            {/* Quantity */}
+                            <td className="py-2 px-2 text-center">
+                              <input
+                                type="number"
+                                min="1"
+                                value={item.quantity}
+                                onChange={(e) => updateBOMItemField(idx, 'quantity', e.target.value)}
+                                className="w-14 text-center font-bold text-slate-900 border border-slate-200 rounded px-1.5 py-1 text-xs focus:ring-1 focus:ring-amber-500"
+                              />
+                            </td>
+
+                            {/* Unit */}
+                            <td className="py-2 px-2">
+                              <select
+                                value={item.unit || 'piece'}
+                                onChange={(e) => updateBOMItemField(idx, 'unit', e.target.value)}
+                                className="w-full border border-slate-200 rounded px-1.5 py-1 text-xs bg-white text-slate-600"
+                              >
+                                <option value="piece">piece</option>
+                                <option value="Nos">Nos</option>
+                                <option value="set">set</option>
+                                <option value="kg">kg</option>
+                                <option value="m">m</option>
+                              </select>
+                            </td>
+
+                            {/* Unit Weight */}
+                            <td className="py-2 px-3">
+                              <input
+                                type="number"
+                                step="0.01"
+                                min="0"
+                                value={item.unit_weight}
+                                onChange={(e) => updateBOMItemField(idx, 'unit_weight', e.target.value)}
+                                className="w-24 font-mono font-medium text-slate-800 border border-slate-200 rounded px-2 py-1 text-xs focus:ring-1 focus:ring-amber-500"
+                              />
+                            </td>
+
+                            {/* Material Rate */}
+                            <td className="py-2 px-3">
+                              <div className="flex flex-col space-y-0.5">
+                                <input
+                                  type="number"
+                                  step="1"
+                                  min="0"
+                                  value={item.unit_material_rate}
+                                  onChange={(e) => updateBOMItemField(idx, 'unit_material_rate', e.target.value)}
+                                  className={`w-28 font-mono font-semibold border rounded px-2 py-1 text-xs focus:ring-1 focus:ring-amber-500 ${
+                                    isCustomRate ? 'border-amber-400 bg-amber-50/60 text-amber-900' : 'border-slate-200 text-slate-800'
+                                  }`}
+                                />
+                                <span className={`text-[9px] font-bold uppercase tracking-wider px-1 rounded inline-block w-max ${
+                                  isCustomRate ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-500'
+                                }`}>
+                                  {isCustomRate ? 'Custom Rate' : 'DB Rate'}
+                                </span>
+                              </div>
+                            </td>
+
+                            {/* Machining / Fabrication Cost */}
+                            <td className="py-2 px-3">
+                              <input
+                                type="number"
+                                step="10"
+                                min="0"
+                                value={item.machining_cost || 0}
+                                onChange={(e) => updateBOMItemField(idx, 'machining_cost', parseFloat(e.target.value) || 0)}
+                                className="w-28 font-mono text-slate-800 border border-slate-200 rounded px-2 py-1 text-xs focus:ring-1 focus:ring-amber-500"
+                              />
+                            </td>
+
+                            {/* Component Total */}
+                            <td className="py-2 px-3 text-right font-mono font-bold text-slate-900 text-xs">
+                              {formatINR(compTotal)}
+                            </td>
+
+                            {/* Actions */}
+                            <td className="py-2 px-2 text-center space-x-1">
+                              <button
+                                type="button"
+                                onClick={() => handleDuplicateComponent(idx)}
+                                className="p-1 hover:bg-slate-100 text-slate-500 hover:text-slate-900 rounded"
+                                title="Duplicate this component"
+                              >
+                                <Copy className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveComponent(idx)}
+                                className="p-1 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded"
+                                title="Delete component"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Live Automatic Cost Summary Banner */}
+                <div className="mt-4 bg-slate-900 text-white rounded-xl p-4 shadow-sm">
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-center divide-y sm:divide-y-0 sm:divide-x divide-slate-800 text-xs">
+                    <div>
+                      <p className="text-[10px] text-slate-400 uppercase font-semibold">Components</p>
+                      <p className="text-base font-bold text-white mt-0.5">
+                        {bomMetrics.totalItemsCount} <span className="text-xs font-normal text-slate-400">({bomMetrics.totalQty} pcs)</span>
+                      </p>
+                    </div>
+
+                    <div>
+                      <p className="text-[10px] text-slate-400 uppercase font-semibold">Total Material Wt</p>
+                      <p className="text-base font-mono font-bold text-amber-400 mt-0.5">
+                        {bomMetrics.totalWeight.toFixed(2)} kg
+                      </p>
+                    </div>
+
+                    <div>
+                      <p className="text-[10px] text-slate-400 uppercase font-semibold">Raw Material Cost</p>
+                      <p className="text-base font-mono font-bold text-slate-200 mt-0.5">
+                        {formatINR(bomMetrics.totalRawMaterialCost)}
+                      </p>
+                    </div>
+
+                    <div>
+                      <p className="text-[10px] text-slate-400 uppercase font-semibold">Machining & Fab</p>
+                      <p className="text-base font-mono font-bold text-slate-200 mt-0.5">
+                        {formatINR(bomMetrics.totalMachiningFabCost)}
+                      </p>
+                    </div>
+
+                    <div className="bg-amber-500/10 rounded-lg p-1">
+                      <p className="text-[10px] text-amber-400 uppercase font-bold">Total BOM Subtotal</p>
+                      <p className="text-base font-mono font-black text-amber-400 mt-0.5">
+                        {formatINR(bomMetrics.totalBOMCost)}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Commercial Controls: Margin & Tax Summary */}
+                <div className="mt-4 bg-slate-50 border border-slate-200 rounded-xl p-4 flex flex-col md:flex-row items-center justify-between gap-4 text-xs">
+                  <div className="flex flex-wrap items-center gap-4">
+                    <div className="flex items-center space-x-2">
+                      <label className="font-semibold text-slate-700">Margin (%):</label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={currentConfig.margin_percent || 0}
+                        onChange={(e) => setCurrentConfig({ ...currentConfig, margin_percent: parseFloat(e.target.value) || 0 })}
+                        className="w-16 border border-slate-300 rounded px-2 py-1 bg-white font-mono"
+                      />
+                      <span className="text-slate-500 font-mono">+{formatINR(bomMetrics.marginAmt)}</span>
+                    </div>
+
+                    <div className="flex items-center space-x-2">
+                      <label className="font-semibold text-slate-700">GST / Tax (%):</label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={currentConfig.tax_percent || 0}
+                        onChange={(e) => setCurrentConfig({ ...currentConfig, tax_percent: parseFloat(e.target.value) || 0 })}
+                        className="w-16 border border-slate-300 rounded px-2 py-1 bg-white font-mono"
+                      />
+                      <span className="text-slate-500 font-mono">+{formatINR(bomMetrics.taxAmt)}</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center space-x-2">
+                    <span className="text-xs font-semibold text-slate-500 uppercase">Estimated Quotation Total:</span>
+                    <span className="text-lg font-black text-slate-900 font-mono">
+                      {formatINR(bomMetrics.finalAmount)}
+                    </span>
+                  </div>
                 </div>
               </div>
 
@@ -1158,7 +1663,7 @@ export default function App() {
                     disabled={loading}
                     className="px-5 py-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-lg text-xs flex items-center space-x-1.5 shadow-sm"
                   >
-                    <span>Continue to BOM & Estimation</span>
+                    <span>Proceed to Full BOM & Cost Engine</span>
                     <ArrowRight className="h-3.5 w-3.5" />
                   </button>
                 </div>
@@ -1167,20 +1672,20 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 3: BOM AND COMPONENT EDITOR */}
-        {activeTab === 'bom_editor' && estimateResult && (
+        {/* TAB 3: DEDICATED BOM AND COMPONENT EDITOR */}
+        {activeTab === 'bom_editor' && (
           <div className="p-6 max-w-6xl mx-auto w-full space-y-5">
-            {/* Engineering Classification Summary Header */}
+            {/* Header Summary */}
             <div className="bg-slate-900 text-white rounded-xl p-5 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div>
                 <span className="bg-amber-500 text-slate-950 font-bold px-2 py-0.5 rounded text-[10px] uppercase tracking-wider">
-                  {estimateResult.size_category} CATEGORY
+                  {estimateResult?.size_category || 'DYNAMIC'} CATEGORY
                 </span>
                 <h2 className="text-lg font-bold mt-1 tracking-tight">
-                  {estimateResult.equipment_type} — Bill of Materials (BOM)
+                  {currentConfig.equipment_type} — Dynamic Bill of Materials (BOM)
                 </h2>
                 <p className="text-xs text-slate-300 mt-0.5">
-                  Governing Classification: {estimateResult.governing_dimension}
+                  Real-time calculated weights & individual material rates
                 </p>
               </div>
 
@@ -1188,75 +1693,42 @@ export default function App() {
                 <div>
                   <p className="text-[10px] text-slate-400 uppercase font-semibold">Total Weight</p>
                   <p className="text-base font-mono font-bold text-amber-400">
-                    {estimateResult.total_weight_kg.toFixed(2)} kg
+                    {bomMetrics.totalWeight.toFixed(2)} kg
                   </p>
                 </div>
                 <div className="h-8 w-px bg-slate-700"></div>
                 <div>
-                  <p className="text-[10px] text-slate-400 uppercase font-semibold">Total Components</p>
+                  <p className="text-[10px] text-slate-400 uppercase font-semibold">Total BOM Cost</p>
                   <p className="text-base font-mono font-bold text-white">
-                    {estimateResult.bom_items.length} Parts
+                    {formatINR(bomMetrics.totalBOMCost)}
                   </p>
                 </div>
               </div>
             </div>
 
-            {/* Warnings Alert */}
-            {estimateResult.warnings && estimateResult.warnings.length > 0 && (
-              <div className="bg-amber-50 border-l-4 border-amber-500 p-3.5 rounded-r-lg space-y-1">
-                <div className="flex items-center space-x-2 text-amber-900 font-bold text-xs">
-                  <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
-                  <span>Engineering Notice & Cost Assumptions:</span>
-                </div>
-                {estimateResult.warnings.map((w, idx) => (
-                  <p key={idx} className="text-xs text-amber-800 pl-6">• {w}</p>
-                ))}
-              </div>
-            )}
-
-            {/* Interactive BOM Table */}
+            {/* Interactive BOM Table Card */}
             <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
-              <div className="p-4 border-b border-slate-200 flex items-center justify-between">
+              <div className="p-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                 <div>
                   <h3 className="font-bold text-slate-900 text-sm">Verified Component Items</h3>
-                  <p className="text-xs text-slate-500">Edit dimensions, shapes, and material grades with real-time recalculated weights.</p>
+                  <p className="text-xs text-slate-500">Edit component names, material grades, weights, and unit material rates.</p>
                 </div>
 
                 <div className="flex items-center space-x-2">
                   <button
-                    onClick={() => {
-                      // Add new custom item
-                      const newItem: BOMItem = {
-                        id: (estimateResult.bom_items.length + 1),
-                        part_name: 'Custom Fabricated Part',
-                        category: 'Auxiliary',
-                        shape: 'plate',
-                        material_grade: currentConfig.body_material,
-                        length: 500,
-                        width: 200,
-                        thickness: 10,
-                        diameter: 0,
-                        wall_thickness: 0,
-                        quantity: 1,
-                        unit_machining_rate: 100
-                      };
-                      handleRecalculateBOM([...estimateResult.bom_items, newItem]);
-                    }}
-                    className="bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold px-3 py-1.5 rounded-lg flex items-center space-x-1"
+                    onClick={handleResetTemplate}
+                    className="bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-semibold px-3 py-1.5 rounded-lg border border-amber-200 flex items-center space-x-1"
                   >
-                    <Plus className="h-3.5 w-3.5" />
-                    <span>Add Custom Part</span>
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    <span>Reset Default Template</span>
                   </button>
 
                   <button
-                    onClick={() => {
-                      // Restore standard BOM
-                      handleProceedToBOM();
-                    }}
-                    className="bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-semibold px-3 py-1.5 rounded-lg border border-amber-200 flex items-center space-x-1"
+                    onClick={handleAddComponent}
+                    className="bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-bold px-3 py-1.5 rounded-lg flex items-center space-x-1"
                   >
-                    <RefreshCw className="h-3.5 w-3.5" />
-                    <span>Restore Standard BOM</span>
+                    <Plus className="h-3.5 w-3.5" />
+                    <span>Add Custom Part</span>
                   </button>
                 </div>
               </div>
@@ -1265,213 +1737,137 @@ export default function App() {
                 <table className="w-full text-left text-xs">
                   <thead className="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200">
                     <tr>
-                      <th className="py-2.5 px-3">Part Name</th>
-                      <th className="py-2.5 px-3">Shape</th>
-                      <th className="py-2.5 px-3">Material</th>
-                      <th className="py-2.5 px-3">Dimensions (mm)</th>
-                      <th className="py-2.5 px-3">Qty</th>
-                      <th className="py-2.5 px-3">Unit Wt</th>
-                      <th className="py-2.5 px-3">Total Wt</th>
-                      <th className="py-2.5 px-3">Raw Mat</th>
-                      <th className="py-2.5 px-3">Cutting</th>
-                      <th className="py-2.5 px-3">Machining</th>
-                      <th className="py-2.5 px-3 text-right">Action</th>
+                      <th className="py-2.5 px-3">#</th>
+                      <th className="py-2.5 px-3">Component Name</th>
+                      <th className="py-2.5 px-3">Material Grade</th>
+                      <th className="py-2.5 px-2 text-center">Qty</th>
+                      <th className="py-2.5 px-2">Unit</th>
+                      <th className="py-2.5 px-3">Unit Wt (kg)</th>
+                      <th className="py-2.5 px-3">Material Rate (₹/kg)</th>
+                      <th className="py-2.5 px-3">Machining/Fab (₹)</th>
+                      <th className="py-2.5 px-3 text-right">Component Total</th>
+                      <th className="py-2.5 px-2 text-center">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {estimateResult.bom_items.map((item, idx) => (
-                      <tr key={idx} className="hover:bg-slate-50/70">
-                        <td className="py-2 px-3">
-                          <input
-                            type="text"
-                            value={item.part_name}
-                            onChange={(e) => {
-                              const updated = [...estimateResult.bom_items];
-                              updated[idx].part_name = e.target.value;
-                              handleRecalculateBOM(updated);
-                            }}
-                            className="w-36 font-semibold text-slate-800 border border-slate-200 rounded px-1.5 py-1 text-xs"
-                          />
-                        </td>
-                        <td className="py-2 px-3">
-                          <select
-                            value={item.shape}
-                            onChange={(e) => {
-                              const updated = [...estimateResult.bom_items];
-                              updated[idx].shape = e.target.value as any;
-                              handleRecalculateBOM(updated);
-                            }}
-                            className="border border-slate-200 rounded px-1.5 py-1 text-xs"
-                          >
-                            <option value="plate">Plate</option>
-                            <option value="round_bar">Round Bar</option>
-                            <option value="pipe">Pipe/Tube</option>
-                          </select>
-                        </td>
-                        <td className="py-2 px-3">
-                          <select
-                            value={item.material_grade}
-                            onChange={(e) => {
-                              const updated = [...estimateResult.bom_items];
-                              updated[idx].material_grade = e.target.value;
-                              handleRecalculateBOM(updated);
-                            }}
-                            className="border border-slate-200 rounded px-1.5 py-1 text-xs"
-                          >
-                            <option value="IS 2062">IS 2062</option>
-                            <option value="SS 304 L">SS 304 L</option>
-                            <option value="SS 316 L">SS 316 L</option>
-                            <option value="SS 410">SS 410</option>
-                            <option value="EN8">EN8</option>
-                          </select>
-                        </td>
-                        <td className="py-2 px-3">
-                          {item.shape === 'plate' && (
-                            <div className="flex items-center space-x-1 font-mono text-[11px]">
-                              <span>L:</span>
-                              <input
-                                type="number"
-                                value={item.length}
-                                onChange={(e) => {
-                                  const updated = [...estimateResult.bom_items];
-                                  updated[idx].length = parseFloat(e.target.value) || 0;
-                                  handleRecalculateBOM(updated);
-                                }}
-                                className="w-14 border border-slate-200 rounded px-1 py-0.5 text-xs"
-                              />
-                              <span>W:</span>
-                              <input
-                                type="number"
-                                value={item.width}
-                                onChange={(e) => {
-                                  const updated = [...estimateResult.bom_items];
-                                  updated[idx].width = parseFloat(e.target.value) || 0;
-                                  handleRecalculateBOM(updated);
-                                }}
-                                className="w-14 border border-slate-200 rounded px-1 py-0.5 text-xs"
-                              />
-                              <span>T:</span>
-                              <input
-                                type="number"
-                                value={item.thickness}
-                                onChange={(e) => {
-                                  const updated = [...estimateResult.bom_items];
-                                  updated[idx].thickness = parseFloat(e.target.value) || 0;
-                                  handleRecalculateBOM(updated);
-                                }}
-                                className="w-12 border border-slate-200 rounded px-1 py-0.5 text-xs"
-                              />
-                            </div>
-                          )}
+                    {(currentConfig.custom_bom || []).map((item, idx) => {
+                      const rawCost = (item.quantity || 1) * (item.unit_weight || 0) * (item.unit_material_rate || 0);
+                      const compTotal = rawCost + (item.machining_cost || 0);
+                      const isCustomRate = item.rate_source === 'custom';
 
-                          {item.shape === 'round_bar' && (
-                            <div className="flex items-center space-x-1 font-mono text-[11px]">
-                              <span>Ø:</span>
-                              <input
-                                type="number"
-                                value={item.diameter}
-                                onChange={(e) => {
-                                  const updated = [...estimateResult.bom_items];
-                                  updated[idx].diameter = parseFloat(e.target.value) || 0;
-                                  handleRecalculateBOM(updated);
-                                }}
-                                className="w-14 border border-slate-200 rounded px-1 py-0.5 text-xs"
-                              />
-                              <span>L:</span>
-                              <input
-                                type="number"
-                                value={item.length}
-                                onChange={(e) => {
-                                  const updated = [...estimateResult.bom_items];
-                                  updated[idx].length = parseFloat(e.target.value) || 0;
-                                  handleRecalculateBOM(updated);
-                                }}
-                                className="w-16 border border-slate-200 rounded px-1 py-0.5 text-xs"
-                              />
-                            </div>
-                          )}
+                      return (
+                        <tr key={idx} className="hover:bg-slate-50/70">
+                          <td className="py-2 px-3 text-slate-400 font-mono">{idx + 1}</td>
+                          <td className="py-2 px-3">
+                            <input
+                              type="text"
+                              value={item.part_name}
+                              onChange={(e) => updateBOMItemField(idx, 'part_name', e.target.value)}
+                              className="w-40 font-semibold text-slate-800 border border-slate-200 rounded px-1.5 py-1 text-xs"
+                            />
+                          </td>
 
-                          {item.shape === 'pipe' && (
-                            <div className="flex items-center space-x-1 font-mono text-[11px]">
-                              <span>OD:</span>
+                          <td className="py-2 px-3">
+                            <select
+                              value={item.material_grade}
+                              onChange={(e) => updateBOMItemField(idx, 'material_grade', e.target.value)}
+                              className="border border-slate-200 rounded px-1.5 py-1 text-xs bg-white text-slate-800 font-medium"
+                            >
+                              {materials.map(m => (
+                                <option key={m.name} value={m.name}>{m.name} (₹{m.raw_rate}/kg)</option>
+                              ))}
+                            </select>
+                          </td>
+
+                          <td className="py-2 px-2 text-center">
+                            <input
+                              type="number"
+                              min="1"
+                              value={item.quantity}
+                              onChange={(e) => updateBOMItemField(idx, 'quantity', e.target.value)}
+                              className="w-14 text-center font-bold border border-slate-200 rounded px-1 py-1 text-xs"
+                            />
+                          </td>
+
+                          <td className="py-2 px-2">
+                            <select
+                              value={item.unit || 'piece'}
+                              onChange={(e) => updateBOMItemField(idx, 'unit', e.target.value)}
+                              className="border border-slate-200 rounded px-1 py-1 text-xs bg-white text-slate-600"
+                            >
+                              <option value="piece">piece</option>
+                              <option value="Nos">Nos</option>
+                              <option value="set">set</option>
+                              <option value="kg">kg</option>
+                              <option value="m">m</option>
+                            </select>
+                          </td>
+
+                          <td className="py-2 px-3">
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              value={item.unit_weight}
+                              onChange={(e) => updateBOMItemField(idx, 'unit_weight', e.target.value)}
+                              className="w-20 font-mono border border-slate-200 rounded px-1.5 py-1 text-xs"
+                            />
+                          </td>
+
+                          <td className="py-2 px-3">
+                            <div className="flex items-center space-x-1">
                               <input
                                 type="number"
-                                value={item.diameter}
-                                onChange={(e) => {
-                                  const updated = [...estimateResult.bom_items];
-                                  updated[idx].diameter = parseFloat(e.target.value) || 0;
-                                  handleRecalculateBOM(updated);
-                                }}
-                                className="w-14 border border-slate-200 rounded px-1 py-0.5 text-xs"
+                                step="1"
+                                min="0"
+                                value={item.unit_material_rate}
+                                onChange={(e) => updateBOMItemField(idx, 'unit_material_rate', e.target.value)}
+                                className={`w-20 font-mono border rounded px-1.5 py-1 text-xs ${
+                                  isCustomRate ? 'border-amber-400 bg-amber-50 text-amber-900 font-bold' : 'border-slate-200 text-slate-800'
+                                }`}
                               />
-                              <span>Wall:</span>
-                              <input
-                                type="number"
-                                value={item.wall_thickness}
-                                onChange={(e) => {
-                                  const updated = [...estimateResult.bom_items];
-                                  updated[idx].wall_thickness = parseFloat(e.target.value) || 0;
-                                  handleRecalculateBOM(updated);
-                                }}
-                                className="w-12 border border-slate-200 rounded px-1 py-0.5 text-xs"
-                              />
-                              <span>L:</span>
-                              <input
-                                type="number"
-                                value={item.length}
-                                onChange={(e) => {
-                                  const updated = [...estimateResult.bom_items];
-                                  updated[idx].length = parseFloat(e.target.value) || 0;
-                                  handleRecalculateBOM(updated);
-                                }}
-                                className="w-14 border border-slate-200 rounded px-1 py-0.5 text-xs"
-                              />
+                              <span className={`text-[9px] px-1 py-0.5 rounded font-bold ${
+                                isCustomRate ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-500'
+                              }`}>
+                                {isCustomRate ? 'Custom' : 'DB'}
+                              </span>
                             </div>
-                          )}
-                        </td>
-                        <td className="py-2 px-3">
-                          <input
-                            type="number"
-                            min="1"
-                            value={item.quantity}
-                            onChange={(e) => {
-                              const updated = [...estimateResult.bom_items];
-                              updated[idx].quantity = parseInt(e.target.value) || 1;
-                              handleRecalculateBOM(updated);
-                            }}
-                            className="w-12 border border-slate-200 rounded px-1.5 py-1 text-xs"
-                          />
-                        </td>
-                        <td className="py-2 px-3 font-mono text-slate-600">{item.unit_weight?.toFixed(2)} kg</td>
-                        <td className="py-2 px-3 font-mono font-semibold text-slate-900">{item.total_weight?.toFixed(2)} kg</td>
-                        <td className="py-2 px-3 font-semibold text-slate-800">{formatINR(item.raw_material_cost)}</td>
-                        <td className="py-2 px-3 text-slate-600">{formatINR(item.cutting_cost)}</td>
-                        <td className="py-2 px-3 text-slate-600">
-                          <input
-                            type="number"
-                            value={item.unit_machining_rate}
-                            onChange={(e) => {
-                              const updated = [...estimateResult.bom_items];
-                              updated[idx].unit_machining_rate = parseFloat(e.target.value) || 0;
-                              handleRecalculateBOM(updated);
-                            }}
-                            className="w-16 border border-slate-200 rounded px-1 py-0.5 text-xs"
-                          />
-                        </td>
-                        <td className="py-2 px-3 text-right">
-                          <button
-                            onClick={() => {
-                              const updated = estimateResult.bom_items.filter((_, i) => i !== idx);
-                              handleRecalculateBOM(updated);
-                            }}
-                            className="text-slate-400 hover:text-rose-600 p-1"
-                            title="Remove part"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                          </td>
+
+                          <td className="py-2 px-3">
+                            <input
+                              type="number"
+                              step="10"
+                              min="0"
+                              value={item.machining_cost || 0}
+                              onChange={(e) => updateBOMItemField(idx, 'machining_cost', parseFloat(e.target.value) || 0)}
+                              className="w-24 font-mono border border-slate-200 rounded px-1.5 py-1 text-xs"
+                            />
+                          </td>
+
+                          <td className="py-2 px-3 text-right font-mono font-bold text-slate-900">
+                            {formatINR(compTotal)}
+                          </td>
+
+                          <td className="py-2 px-2 text-center space-x-1">
+                            <button
+                              onClick={() => handleDuplicateComponent(idx)}
+                              className="p-1 hover:bg-slate-100 text-slate-500 rounded"
+                              title="Duplicate"
+                            >
+                              <Copy className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              onClick={() => handleRemoveComponent(idx)}
+                              className="p-1 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded"
+                              title="Remove part"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1490,7 +1886,7 @@ export default function App() {
                 onClick={() => setActiveTab('results')}
                 className="px-5 py-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-lg text-xs flex items-center space-x-1.5 shadow-sm"
               >
-                <span>View Complete Cost Estimate</span>
+                <span>View Complete Cost Breakdown</span>
                 <ArrowRight className="h-3.5 w-3.5" />
               </button>
             </div>
@@ -1498,51 +1894,47 @@ export default function App() {
         )}
 
         {/* TAB 4: COST ESTIMATION RESULTS */}
-        {activeTab === 'results' && estimateResult && (
+        {activeTab === 'results' && (
           <div className="p-6 max-w-5xl mx-auto w-full space-y-6">
             {/* Top Engineering Summary Metrics */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="bg-white rounded-xl p-5 border border-slate-200 shadow-xs">
                 <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Calculated Equipment Weight</p>
                 <p className="text-2xl font-bold font-mono text-slate-900 mt-1">
-                  {estimateResult.total_weight_kg.toFixed(2)} <span className="text-sm font-normal text-slate-500">kg</span>
+                  {bomMetrics.totalWeight.toFixed(2)} <span className="text-sm font-normal text-slate-500">kg</span>
                 </p>
                 <span className="text-[11px] text-slate-400 mt-1 block">For {currentConfig.quantity} configured unit(s)</span>
               </div>
 
               <div className="bg-white rounded-xl p-5 border border-slate-200 shadow-xs">
-                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Engineering Size Class</p>
-                <div className="flex items-center space-x-2 mt-1">
-                  <span className={`px-2.5 py-1 rounded text-sm font-bold ${
-                    estimateResult.size_category === 'SMALL' ? 'bg-blue-100 text-blue-800' :
-                    estimateResult.size_category === 'MEDIUM' ? 'bg-amber-100 text-amber-800' :
-                    'bg-purple-100 text-purple-800'
-                  }`}>
-                    {estimateResult.size_category}
+                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Equipment Specification</p>
+                <div className="mt-1">
+                  <span className="px-2.5 py-1 rounded text-sm font-bold bg-amber-100 text-amber-900">
+                    {currentConfig.equipment_type}
                   </span>
                 </div>
-                <span className="text-[11px] text-slate-500 mt-1 block truncate" title={estimateResult.governing_dimension}>
-                  {estimateResult.governing_dimension}
+                <span className="text-[11px] text-slate-500 mt-1.5 block">
+                  {currentConfig.length} × {currentConfig.width_diameter} × {currentConfig.depth} mm
                 </span>
               </div>
 
               <div className="bg-amber-500 rounded-xl p-5 text-slate-950 shadow-md">
                 <p className="text-xs font-bold uppercase tracking-wider opacity-90">Final Estimated Price (INR)</p>
                 <p className="text-2xl font-black mt-1 tracking-tight">
-                  {formatINR(estimateResult.cost_breakdown.final_amount)}
+                  {formatINR(bomMetrics.finalAmount)}
                 </p>
                 <span className="text-[11px] font-medium opacity-90 mt-1 block">
-                  Includes {estimateResult.cost_breakdown.margin_percent}% margin & {estimateResult.cost_breakdown.tax_percent}% GST
+                  Includes {currentConfig.margin_percent}% margin & {currentConfig.tax_percent}% GST
                 </span>
               </div>
             </div>
 
-            {/* Itemized 7 Cost Heads Breakdown Table */}
+            {/* Transparent Cost Heads Breakdown Table */}
             <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
               <div className="p-4 border-b border-slate-200 flex items-center justify-between">
                 <div>
                   <h3 className="font-bold text-slate-900 text-sm">Transparent Cost Head Breakdown</h3>
-                  <p className="text-xs text-slate-500">Itemized calculation from raw material to bought-out and actuation</p>
+                  <p className="text-xs text-slate-500">Itemized calculation from raw material to machining and commercial overheads</p>
                 </div>
               </div>
 
@@ -1559,126 +1951,49 @@ export default function App() {
                   <tr>
                     <td className="py-3 px-4 text-slate-400">1</td>
                     <td className="py-3 px-4 font-semibold text-slate-900">Raw Material Cost</td>
-                    <td className="py-3 px-4 text-slate-500">Component weights × Material rates per kg</td>
+                    <td className="py-3 px-4 text-slate-500">Component weights × individual material rates</td>
                     <td className="py-3 px-4 text-right font-mono font-semibold text-slate-900">
-                      {formatINR(estimateResult.cost_breakdown.raw_material_cost)}
+                      {formatINR(bomMetrics.totalRawMaterialCost * currentConfig.quantity)}
                     </td>
                   </tr>
 
                   <tr>
                     <td className="py-3 px-4 text-slate-400">2</td>
-                    <td className="py-3 px-4 font-semibold text-slate-900">Laser / Profile Cutting Cost</td>
-                    <td className="py-3 px-4 text-slate-500">Calculated weight × Profile cutting rate (₹10/kg)</td>
+                    <td className="py-3 px-4 font-semibold text-slate-900">Machining & Fabrication Charges</td>
+                    <td className="py-3 px-4 text-slate-500">Component machining and assembly charges</td>
                     <td className="py-3 px-4 text-right font-mono text-slate-700">
-                      {formatINR(estimateResult.cost_breakdown.cutting_cost)}
+                      {formatINR(bomMetrics.totalMachiningFabCost * currentConfig.quantity)}
                     </td>
                   </tr>
 
-                  <tr>
-                    <td className="py-3 px-4 text-slate-400">3</td>
-                    <td className="py-3 px-4 font-semibold text-slate-900">Precision Machining Charges</td>
-                    <td className="py-3 px-4 text-slate-500">Machining rate per piece across all BOM items</td>
-                    <td className="py-3 px-4 text-right font-mono text-slate-700">
-                      {formatINR(estimateResult.cost_breakdown.machining_cost)}
-                    </td>
-                  </tr>
-
-                  <tr>
-                    <td className="py-3 px-4 text-slate-400">4</td>
-                    <td className="py-3 px-4 font-semibold text-slate-900">Fabrication & Assembly Charges</td>
-                    <td className="py-3 px-4 text-slate-500">Base ₹96/kg × Applicable Material Multiplier</td>
-                    <td className="py-3 px-4 text-right font-mono text-slate-700">
-                      {formatINR(estimateResult.cost_breakdown.fabrication_cost)}
-                    </td>
-                  </tr>
-
-                  <tr>
-                    <td className="py-3 px-4 text-slate-400">5</td>
-                    <td className="py-3 px-4 font-semibold text-slate-900">Surface Preparation & Finishing</td>
-                    <td className="py-3 px-4 text-slate-500">Total weight × Finishing rate (₹20/kg)</td>
-                    <td className="py-3 px-4 text-right font-mono text-slate-700">
-                      {formatINR(estimateResult.cost_breakdown.finishing_cost)}
-                    </td>
-                  </tr>
-
-                  <tr>
-                    <td className="py-3 px-4 text-slate-400">6</td>
-                    <td className="py-3 px-4 font-semibold text-slate-900">Bought-Out Engineering Items</td>
-                    <td className="py-3 px-4 text-slate-500">Racks, pinions, bearings, seals for {estimateResult.size_category} class</td>
-                    <td className="py-3 px-4 text-right font-mono text-slate-700">
-                      {formatINR(estimateResult.cost_breakdown.bought_out_cost)}
-                    </td>
-                  </tr>
-
-                  <tr>
-                    <td className="py-3 px-4 text-slate-400">7</td>
-                    <td className="py-3 px-4 font-semibold text-slate-900">Automation & Actuation Package</td>
-                    <td className="py-3 px-4 text-slate-500">{currentConfig.actuation_type} Actuator + Gearbox + Mounting</td>
-                    <td className="py-3 px-4 text-right font-mono text-slate-700">
-                      {formatINR(estimateResult.cost_breakdown.actuation_cost)}
-                    </td>
-                  </tr>
-
-                  {/* Subtotal */}
+                  {/* Manufacturing Subtotal */}
                   <tr className="bg-slate-50 font-bold border-t-2 border-slate-200">
                     <td colSpan={3} className="py-3 px-4 text-slate-900 text-right">
-                      Manufacturing Subtotal:
+                      Manufacturing BOM Subtotal:
                     </td>
                     <td className="py-3 px-4 text-right font-mono text-slate-900 text-sm">
-                      {formatINR(estimateResult.cost_breakdown.subtotal)}
+                      {formatINR(bomMetrics.subtotal)}
                     </td>
                   </tr>
 
                   {/* Commercial Controls: Margin & Tax */}
                   <tr className="bg-white">
                     <td colSpan={2} className="py-2.5 px-4 text-slate-700 font-semibold">
-                      Approved Engineering Margin (%):
+                      Approved Engineering Margin ({currentConfig.margin_percent}%):
                     </td>
-                    <td className="py-2.5 px-4">
-                      <div className="flex items-center space-x-2">
-                        <input
-                          type="number"
-                          min="0"
-                          max="100"
-                          value={currentConfig.margin_percent || 0}
-                          onChange={(e) => {
-                            const val = parseFloat(e.target.value) || 0;
-                            setCurrentConfig(prev => ({ ...prev, margin_percent: val }));
-                            handleRecalculateBOM(estimateResult.bom_items);
-                          }}
-                          className="w-16 border border-slate-300 rounded px-2 py-1 text-xs"
-                        />
-                        <span className="text-slate-500">% margin</span>
-                      </div>
-                    </td>
+                    <td className="py-2.5 px-4 text-slate-500">Commercial engineering overhead & margin</td>
                     <td className="py-2.5 px-4 text-right font-mono text-slate-800">
-                      {formatINR(estimateResult.cost_breakdown.margin_amount)}
+                      {formatINR(bomMetrics.marginAmt)}
                     </td>
                   </tr>
 
                   <tr className="bg-white">
                     <td colSpan={2} className="py-2.5 px-4 text-slate-700 font-semibold">
-                      Applicable GST / Taxes (%):
+                      Applicable GST / Taxes ({currentConfig.tax_percent}%):
                     </td>
-                    <td className="py-2.5 px-4">
-                      <div className="flex items-center space-x-2">
-                        <input
-                          type="number"
-                          min="0"
-                          max="100"
-                          value={currentConfig.tax_percent || 0}
-                          onChange={(e) => {
-                            const val = parseFloat(e.target.value) || 0;
-                            setCurrentConfig(prev => ({ ...prev, tax_percent: val }));
-                            handleRecalculateBOM(estimateResult.bom_items);
-                          }}
-                          className="w-16 border border-slate-300 rounded px-2 py-1 text-xs"
-                        />
-                        <span className="text-slate-500">% GST</span>
-                      </div>
-                    </td>
+                    <td className="py-2.5 px-4 text-slate-500">Statutory Indirect Taxes</td>
                     <td className="py-2.5 px-4 text-right font-mono text-slate-800">
-                      {formatINR(estimateResult.cost_breakdown.tax_amount)}
+                      {formatINR(bomMetrics.taxAmt)}
                     </td>
                   </tr>
 
@@ -1688,7 +2003,7 @@ export default function App() {
                       FINAL COMMERCIAL ESTIMATE:
                     </td>
                     <td className="py-3.5 px-4 text-right font-mono text-base text-slate-950">
-                      {formatINR(estimateResult.cost_breakdown.final_amount)}
+                      {formatINR(bomMetrics.finalAmount)}
                     </td>
                   </tr>
                 </tbody>
@@ -1701,7 +2016,7 @@ export default function App() {
                 onClick={() => setActiveTab('bom_editor')}
                 className="px-4 py-2 border border-slate-300 rounded-lg text-xs font-semibold text-slate-700 hover:bg-slate-50"
               >
-                Back to BOM Editor
+                Back to Component BOM
               </button>
 
               <div className="flex items-center space-x-3">
@@ -1727,7 +2042,6 @@ export default function App() {
         {/* TAB 5: QUOTATION PREVIEW & PDF DOWNLOAD */}
         {activeTab === 'preview' && savedQuoteDetail && (
           <div className="p-6 max-w-4xl mx-auto w-full space-y-6">
-            {/* Top Toolbar */}
             <div className="flex items-center justify-between bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
               <div className="flex items-center space-x-3">
                 <div className="h-9 w-9 bg-emerald-100 text-emerald-800 rounded-lg flex items-center justify-center font-bold">
@@ -1765,21 +2079,11 @@ export default function App() {
                     <span>Issue Official Quote</span>
                   </button>
                 )}
-
-                <button
-                  onClick={() => handleRecalculateCurrentRates(savedQuoteDetail.id)}
-                  className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs px-3 py-2 rounded-lg flex items-center space-x-1"
-                  title="Recalculate with active DB rates"
-                >
-                  <RefreshCw className="h-3.5 w-3.5" />
-                  <span>New Revision</span>
-                </button>
               </div>
             </div>
 
-            {/* Document Preview Card (mimics PDF layout) */}
+            {/* Document Preview Card */}
             <div className="bg-white rounded-xl border border-slate-300 shadow-md p-8 space-y-6 text-slate-800">
-              {/* Document Header */}
               <div className="flex justify-between items-start border-b-2 border-amber-500 pb-4">
                 <div>
                   <h2 className="text-lg font-black text-slate-900 tracking-tight">INDUSTRIAL FLOW & DAMPER TECHNOLOGIES</h2>
@@ -1798,155 +2102,120 @@ export default function App() {
                 <div>
                   <h4 className="font-bold text-slate-900 uppercase text-[10px] mb-1">Customer / Project</h4>
                   <p className="font-semibold text-slate-800">{savedQuoteDetail.customer_name}</p>
-                  <p className="text-slate-500">Contact: {savedQuoteDetail.contact_person || 'Commercial Dept'}</p>
-                  <p className="text-slate-500">Project: {savedQuoteDetail.project_name || 'Standard Plant Supply'}</p>
-                  <p className="text-slate-500">RFQ: {savedQuoteDetail.rfq_number || 'Direct Inquiry'}</p>
+                  <p className="text-slate-500">RFQ: {savedQuoteDetail.rfq_number || 'N/A'}</p>
+                  <p className="text-slate-500">Project: {savedQuoteDetail.project_name || 'N/A'}</p>
+                  <p className="text-slate-500">Location: {savedQuoteDetail.delivery_location || 'N/A'}</p>
                 </div>
                 <div>
                   <h4 className="font-bold text-slate-900 uppercase text-[10px] mb-1">Equipment Details</h4>
-                  <p className="font-semibold text-slate-800">{savedQuoteDetail.equipment_type}</p>
-                  <p className="text-slate-500">Tag: {savedQuoteDetail.tag_number || 'TAG-01'} | Qty: {savedQuoteDetail.quantity} Nos</p>
-                  <p className="text-slate-500">Dimensions: {savedQuoteDetail.length} × {savedQuoteDetail.width_diameter} × {savedQuoteDetail.depth} mm</p>
-                  <p className="text-slate-500">Materials: Body {savedQuoteDetail.body_material} / Flap {savedQuoteDetail.flap_disc_material}</p>
-                  <p className="font-mono text-slate-700">Calculated Weight: {savedQuoteDetail.total_weight_kg.toFixed(2)} kg</p>
+                  <p className="font-bold text-slate-900">{savedQuoteDetail.equipment_type} ({savedQuoteDetail.quantity} Unit)</p>
+                  <p className="text-slate-600 font-mono">Dimensions: {savedQuoteDetail.length} × {savedQuoteDetail.width_diameter} × {savedQuoteDetail.depth} mm</p>
+                  <p className="text-slate-600 font-mono">Total Weight: {savedQuoteDetail.total_weight_kg.toFixed(2)} kg</p>
+                  <p className="text-slate-600">Actuation: {savedQuoteDetail.actuation_type}</p>
                 </div>
               </div>
 
-              {/* Commercial Breakdown */}
+              {/* Saved Components Table */}
               <div>
-                <h4 className="font-bold text-slate-900 text-xs mb-2">Commercial Summary & Cost Breakdown</h4>
-                <table className="w-full text-xs text-left">
-                  <thead className="bg-slate-100 text-slate-700 font-semibold">
-                    <tr>
-                      <th className="py-2 px-3">Cost Head</th>
-                      <th className="py-2 px-3">Description</th>
-                      <th className="py-2 px-3 text-right">Amount (INR)</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 font-medium">
-                    <tr>
-                      <td className="py-2 px-3">1. Raw Materials</td>
-                      <td className="py-2 px-3 text-slate-500">Fabricated plate, bar & tube components</td>
-                      <td className="py-2 px-3 text-right font-mono">{formatINR(savedQuoteDetail.cost_breakdown.raw_material_cost)}</td>
-                    </tr>
-                    <tr>
-                      <td className="py-2 px-3">2. Processing & Machining</td>
-                      <td className="py-2 px-3 text-slate-500">Laser cutting + Precision machining charges</td>
-                      <td className="py-2 px-3 text-right font-mono">{formatINR(savedQuoteDetail.cost_breakdown.cutting_cost + savedQuoteDetail.cost_breakdown.machining_cost)}</td>
-                    </tr>
-                    <tr>
-                      <td className="py-2 px-3">3. Fabrication & Finishing</td>
-                      <td className="py-2 px-3 text-slate-500">Base fabrication rate + Surface preparation</td>
-                      <td className="py-2 px-3 text-right font-mono">{formatINR(savedQuoteDetail.cost_breakdown.fabrication_cost + savedQuoteDetail.cost_breakdown.finishing_cost)}</td>
-                    </tr>
-                    <tr>
-                      <td className="py-2 px-3">4. Bought-Out Items</td>
-                      <td className="py-2 px-3 text-slate-500">Standard bearings, seals, racks & hardware</td>
-                      <td className="py-2 px-3 text-right font-mono">{formatINR(savedQuoteDetail.cost_breakdown.bought_out_cost)}</td>
-                    </tr>
-                    <tr>
-                      <td className="py-2 px-3">5. Automation & Actuation</td>
-                      <td className="py-2 px-3 text-slate-500">{savedQuoteDetail.actuation_type} Actuator Package</td>
-                      <td className="py-2 px-3 text-right font-mono">{formatINR(savedQuoteDetail.cost_breakdown.actuation_cost)}</td>
-                    </tr>
-                    <tr className="bg-slate-50 font-bold border-t border-slate-200">
-                      <td colSpan={2} className="py-2 px-3 text-right">Subtotal:</td>
-                      <td className="py-2 px-3 text-right font-mono">{formatINR(savedQuoteDetail.cost_breakdown.subtotal)}</td>
-                    </tr>
-                    <tr>
-                      <td colSpan={2} className="py-1.5 px-3 text-right text-slate-600">GST ({savedQuoteDetail.cost_breakdown.tax_percent}%):</td>
-                      <td className="py-1.5 px-3 text-right font-mono text-slate-700">{formatINR(savedQuoteDetail.cost_breakdown.tax_amount)}</td>
-                    </tr>
-                    <tr className="bg-amber-100 font-black">
-                      <td colSpan={2} className="py-2.5 px-3 text-right text-slate-900 text-sm">TOTAL QUOTATION VALUE:</td>
-                      <td className="py-2.5 px-3 text-right font-mono text-slate-900 text-sm">{formatINR(savedQuoteDetail.cost_breakdown.final_amount)}</td>
-                    </tr>
-                  </tbody>
-                </table>
+                <h4 className="font-bold text-slate-900 text-xs uppercase tracking-wider mb-2">Itemized Bill of Materials</h4>
+                <div className="overflow-x-auto border border-slate-200 rounded-lg">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-900 text-white font-semibold text-[11px]">
+                      <tr>
+                        <th className="py-2 px-3">#</th>
+                        <th className="py-2 px-3">Component Description</th>
+                        <th className="py-2 px-3">Material Grade</th>
+                        <th className="py-2 px-2 text-center">Qty</th>
+                        <th className="py-2 px-3 text-right">Unit Wt (kg)</th>
+                        <th className="py-2 px-3 text-right">Rate (₹/kg)</th>
+                        <th className="py-2 px-3 text-right">Machining (₹)</th>
+                        <th className="py-2 px-3 text-right">Total (₹)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-medium">
+                      {(savedQuoteDetail.bom_items || []).map((item, idx) => {
+                        const raw = (item.quantity || 1) * (item.unit_weight || 0) * (item.unit_material_rate || getMaterialRate(item.material_grade, materials));
+                        const tot = raw + (item.machining_cost || 0);
+                        return (
+                          <tr key={idx} className="hover:bg-slate-50">
+                            <td className="py-2 px-3 text-slate-400 font-mono">{idx + 1}</td>
+                            <td className="py-2 px-3 font-semibold text-slate-900">{item.part_name}</td>
+                            <td className="py-2 px-3 text-slate-700">{item.material_grade}</td>
+                            <td className="py-2 px-2 text-center font-bold">{item.quantity}</td>
+                            <td className="py-2 px-3 text-right font-mono">{item.unit_weight?.toFixed(2)}</td>
+                            <td className="py-2 px-3 text-right font-mono">₹{item.unit_material_rate || getMaterialRate(item.material_grade, materials)}</td>
+                            <td className="py-2 px-3 text-right font-mono">{formatINR(item.machining_cost || 0)}</td>
+                            <td className="py-2 px-3 text-right font-mono font-bold text-slate-900">{formatINR(tot)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </div>
 
-              {/* Standard Commercial Terms */}
-              <div className="text-[11px] text-slate-500 bg-slate-50 p-3 rounded-lg space-y-1">
-                <p><strong>1. Price Basis:</strong> Ex-Works Manufacturing Works.</p>
-                <p><strong>2. Validity:</strong> 30 Days from date of quotation.</p>
-                <p><strong>3. Delivery:</strong> 4 to 6 weeks from receipt of approved drawing and technical clarity.</p>
-                <p><strong>4. Payment Terms:</strong> 30% advance with purchase order, balance 70% against proforma invoice before dispatch.</p>
+              {/* Commercial Total */}
+              <div className="flex justify-end pt-2">
+                <div className="w-72 bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs space-y-1 text-slate-800">
+                  <div className="flex justify-between">
+                    <span>Manufacturing Subtotal:</span>
+                    <span className="font-mono font-semibold">{formatINR(savedQuoteDetail.cost_breakdown.subtotal)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Margin ({savedQuoteDetail.cost_breakdown.margin_percent}%):</span>
+                    <span className="font-mono">{formatINR(savedQuoteDetail.cost_breakdown.margin_amount)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>GST ({savedQuoteDetail.cost_breakdown.tax_percent}%):</span>
+                    <span className="font-mono">{formatINR(savedQuoteDetail.cost_breakdown.tax_amount)}</span>
+                  </div>
+                  <div className="flex justify-between border-t border-amber-300 pt-1.5 font-bold text-sm text-slate-950">
+                    <span>Quotation Total:</span>
+                    <span className="font-mono">{formatINR(savedQuoteDetail.cost_breakdown.final_amount)}</span>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
         )}
 
-        {/* TAB 6: SAVED QUOTATIONS */}
+        {/* TAB 6: SAVED QUOTATIONS LIST */}
         {activeTab === 'saved' && (
-          <div className="p-6 space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div className="p-6 space-y-6">
+            <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-xl font-bold text-slate-900">Saved Quotations Repository</h2>
-                <p className="text-xs text-slate-500">Search, filter, revise, and download previous engineering estimates.</p>
+                <p className="text-xs text-slate-500">Access, duplicate, and download formal technical PDFs.</p>
               </div>
-
-              <div className="flex items-center space-x-2">
-                <select
-                  value={filterType}
-                  onChange={(e) => {
-                    setFilterType(e.target.value);
-                  }}
-                  className="bg-white border border-slate-200 text-xs rounded-lg px-2.5 py-1.5 text-slate-700"
-                >
-                  <option value="">All Equipment</option>
-                  <option value="Rack & Pinion Damper">Rack & Pinion Damper</option>
-                  <option value="Butterfly Valve">Butterfly Valve</option>
-                </select>
-
-                <select
-                  value={filterStatus}
-                  onChange={(e) => {
-                    setFilterStatus(e.target.value);
-                  }}
-                  className="bg-white border border-slate-200 text-xs rounded-lg px-2.5 py-1.5 text-slate-700"
-                >
-                  <option value="">All Statuses</option>
-                  <option value="Draft">Draft</option>
-                  <option value="Validated">Validated</option>
-                  <option value="Issued">Issued</option>
-                </select>
-
-                <button
-                  onClick={refreshQuotations}
-                  className="bg-slate-900 text-white text-xs font-semibold px-3 py-1.5 rounded-lg flex items-center space-x-1"
-                >
-                  <Filter className="h-3 w-3" />
-                  <span>Apply</span>
-                </button>
-              </div>
+              <button
+                onClick={refreshQuotations}
+                className="p-2 border border-slate-200 hover:bg-slate-50 rounded-lg text-slate-600 flex items-center space-x-1.5 text-xs font-semibold"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                <span>Refresh</span>
+              </button>
             </div>
 
-            {/* List Table */}
             <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
               <table className="w-full text-left text-xs">
                 <thead className="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200">
                   <tr>
                     <th className="py-3 px-4">Quote No</th>
                     <th className="py-3 px-4">Customer Name</th>
-                    <th className="py-3 px-4">Equipment</th>
-                    <th className="py-3 px-4">Date</th>
+                    <th className="py-3 px-4">Equipment Type</th>
+                    <th className="py-3 px-4">Created Date</th>
                     <th className="py-3 px-4">Size Class</th>
-                    <th className="py-3 px-4">Total Weight</th>
-                    <th className="py-3 px-4">Quotation Value</th>
+                    <th className="py-3 px-4">Weight (kg)</th>
+                    <th className="py-3 px-4">Estimated Value</th>
                     <th className="py-3 px-4">Status</th>
                     <th className="py-3 px-4 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 font-medium">
                   {quotations.map((q) => (
-                    <tr key={q.id} className="hover:bg-slate-50/70">
-                      <td className="py-3 px-4 font-mono font-semibold text-slate-900">
-                        {q.quote_number} <span className="text-[10px] text-slate-400 font-normal">R{q.revision}</span>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className="font-semibold text-slate-800">{q.customer_name}</span>
-                        {q.project_name && <span className="block text-[10px] text-slate-400">{q.project_name}</span>}
-                      </td>
+                    <tr key={q.id} className="hover:bg-slate-50">
+                      <td className="py-3 px-4 font-mono font-bold text-slate-900">{q.quote_number}</td>
+                      <td className="py-3 px-4 text-slate-800">{q.customer_name}</td>
                       <td className="py-3 px-4 text-slate-700">{q.equipment_type}</td>
                       <td className="py-3 px-4 text-slate-500">{new Date(q.created_at).toLocaleDateString()}</td>
                       <td className="py-3 px-4">
@@ -2008,19 +2277,24 @@ export default function App() {
         {/* TAB 7: PRICING & MATERIAL ADMINISTRATION */}
         {activeTab === 'admin' && (
           <div className="p-6 max-w-5xl mx-auto w-full space-y-6">
-            <div>
-              <h2 className="text-xl font-bold text-slate-900">Material & Pricing Administration</h2>
-              <p className="text-xs text-slate-500">
-                Maintain raw material rates, densities, processing charges, and bought-out component rules.
-              </p>
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between pb-2 border-b border-slate-200 gap-2">
+              <div>
+                <h2 className="text-xl font-bold text-slate-900">Material & Pricing Administration</h2>
+                <p className="text-xs text-slate-500">
+                  Maintain centralized material rates, densities, processing rates, and audit logs.
+                </p>
+              </div>
+              <span className="bg-amber-100 text-amber-900 text-xs font-semibold px-3 py-1 rounded-full border border-amber-200">
+                Configurable Estimates (Verify against supplier quotes)
+              </span>
             </div>
 
             {/* 1. Raw Materials Table */}
             <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
               <div className="p-4 border-b border-slate-200 flex items-center justify-between">
                 <div>
-                  <h3 className="font-bold text-slate-900 text-sm">Material Specifications & Rates</h3>
-                  <p className="text-xs text-slate-500">Live densities, raw material rates in ₹/kg, and fabrication multipliers</p>
+                  <h3 className="font-bold text-slate-900 text-sm">Central Material Database</h3>
+                  <p className="text-xs text-slate-500">Material grades, densities, rates in ₹/kg, and fabrication multipliers</p>
                 </div>
               </div>
 
@@ -2031,12 +2305,12 @@ export default function App() {
                     <th className="py-2.5 px-4">Density (kg/mm³)</th>
                     <th className="py-2.5 px-4">Raw Rate (₹/kg)</th>
                     <th className="py-2.5 px-4">Fab Multiplier</th>
-                    <th className="py-2.5 px-4 text-right">Action</th>
+                    <th className="py-2.5 px-4 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 font-medium">
                   {materials.map((m) => (
-                    <tr key={m.name}>
+                    <tr key={m.name} className="hover:bg-slate-50">
                       <td className="py-2.5 px-4 font-bold text-slate-900">{m.name}</td>
                       <td className="py-2.5 px-4 font-mono text-slate-600">
                         <input
@@ -2050,7 +2324,7 @@ export default function App() {
                           className="w-32 border border-slate-200 rounded px-2 py-1 font-mono text-xs"
                         />
                       </td>
-                      <td className="py-2.5 px-4">
+                      <td className="py-2.5 px-4 font-mono">
                         <input
                           type="number"
                           value={m.raw_rate}
@@ -2058,7 +2332,7 @@ export default function App() {
                             const val = parseFloat(e.target.value) || 0;
                             setMaterials(prev => prev.map(item => item.name === m.name ? { ...item, raw_rate: val } : item));
                           }}
-                          className="w-24 border border-slate-200 rounded px-2 py-1 font-mono text-xs"
+                          className="w-24 border border-slate-200 rounded px-2 py-1 font-mono text-xs font-bold text-slate-900"
                         />
                       </td>
                       <td className="py-2.5 px-4 font-mono">
@@ -2083,14 +2357,15 @@ export default function App() {
                                 raw_rate: m.raw_rate,
                                 fab_multiplier: m.fab_multiplier
                               });
-                              showToast(`Updated material ${m.name}`);
+                              showToast(`Updated material ${m.name} to ₹${m.raw_rate}/kg.`);
+                              loadAdminData();
                             } catch (err: any) {
                               showToast(err.message, true);
                             }
                           }}
-                          className="bg-amber-50 hover:bg-amber-100 text-amber-900 font-semibold px-2.5 py-1 rounded text-xs border border-amber-200"
+                          className="bg-amber-50 hover:bg-amber-100 text-amber-900 font-semibold px-3 py-1 rounded text-xs border border-amber-200"
                         >
-                          Save
+                          Save Rate
                         </button>
                       </td>
                     </tr>
@@ -2099,214 +2374,39 @@ export default function App() {
               </table>
             </div>
 
-            {/* 2. Processing Rates */}
-            <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
-              <div className="p-4 border-b border-slate-200">
-                <h3 className="font-bold text-slate-900 text-sm">Processing & Labor Rates</h3>
-                <p className="text-xs text-slate-500">Fabrication, surface finishing, and laser cutting rates</p>
-              </div>
-
-              <table className="w-full text-left text-xs">
-                <thead className="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200">
-                  <tr>
-                    <th className="py-2.5 px-4">Processing Operation</th>
-                    <th className="py-2.5 px-4">Code</th>
-                    <th className="py-2.5 px-4">Rate (₹/kg)</th>
-                    <th className="py-2.5 px-4 text-right">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 font-medium">
-                  {procRates.map((pr) => (
-                    <tr key={pr.code}>
-                      <td className="py-2.5 px-4 font-semibold text-slate-900">{pr.name}</td>
-                      <td className="py-2.5 px-4 font-mono text-slate-500">{pr.code}</td>
-                      <td className="py-2.5 px-4">
-                        <input
-                          type="number"
-                          value={pr.rate_per_kg}
-                          onChange={(e) => {
-                            const val = parseFloat(e.target.value) || 0;
-                            setProcRates(prev => prev.map(item => item.code === pr.code ? { ...item, rate_per_kg: val } : item));
-                          }}
-                          className="w-24 border border-slate-200 rounded px-2 py-1 font-mono text-xs"
-                        />
-                      </td>
-                      <td className="py-2.5 px-4 text-right">
-                        <button
-                          onClick={async () => {
-                            try {
-                              await updateProcessingRate(pr.code, pr.rate_per_kg);
-                              showToast(`Updated ${pr.name}`);
-                            } catch (err: any) {
-                              showToast(err.message, true);
-                            }
-                          }}
-                          className="bg-amber-50 hover:bg-amber-100 text-amber-900 font-semibold px-2.5 py-1 rounded text-xs border border-amber-200"
-                        >
-                          Save
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {/* 3. Bought-Out Component Rule Creator (e.g. for Medium Butterfly Valve!) */}
-            <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-5 space-y-4">
-              <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                <div>
-                  <h3 className="font-bold text-slate-900 text-sm">Bought-Out Component Rules</h3>
-                  <p className="text-xs text-slate-500">Configure bearings, seals, and hardware per equipment & size category.</p>
+            {/* Material Rate Audit Log */}
+            {materialAudits.length > 0 && (
+              <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-5 space-y-3">
+                <div className="flex items-center space-x-2 border-b border-slate-100 pb-2">
+                  <History className="h-4 w-4 text-slate-600" />
+                  <h3 className="font-bold text-slate-900 text-sm">Material Rate Audit Log</h3>
                 </div>
-              </div>
-
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-900">
-                <p className="font-semibold">
-                  Rule Requirement: The baseline system flags missing Medium Butterfly Valve bought-out rules.
-                </p>
-                <p className="mt-0.5 text-blue-800">
-                  You can authorize and create an explicit configuration for Medium Butterfly Valves below to automatically price them without fallback warnings!
-                </p>
-              </div>
-
-              <form
-                onSubmit={async (e) => {
-                  e.preventDefault();
-                  const target = e.target as any;
-                  const item: BoughtOutItem = {
-                    equipment_type: target.equipment_type.value,
-                    size_category: target.size_category.value,
-                    item_name: target.item_name.value,
-                    quantity: parseInt(target.quantity.value) || 1,
-                    unit_rate: parseFloat(target.unit_rate.value) || 0,
-                    unit: 'piece',
-                    notes: target.notes.value
-                  };
-                  try {
-                    await createBoughtOutItem(item);
-                    showToast(`Created rule: ${item.item_name} for ${item.equipment_type} (${item.size_category})`);
-                    target.reset();
-                    loadAdminData();
-                  } catch (err: any) {
-                    showToast(err.message, true);
-                  }
-                }}
-                className="grid grid-cols-1 md:grid-cols-6 gap-3 text-xs"
-              >
-                <div>
-                  <label className="block font-semibold mb-1">Equipment</label>
-                  <select name="equipment_type" className="w-full border border-slate-300 rounded p-1.5 bg-white">
-                    <option value="Butterfly Valve">Butterfly Valve</option>
-                    <option value="Rack & Pinion Damper">Rack & Pinion Damper</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block font-semibold mb-1">Size Category</label>
-                  <select name="size_category" className="w-full border border-slate-300 rounded p-1.5 bg-white">
-                    <option value="MEDIUM">MEDIUM</option>
-                    <option value="SMALL">SMALL</option>
-                    <option value="LARGE">LARGE</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block font-semibold mb-1">Component Name</label>
-                  <input name="item_name" required placeholder="e.g. Medium Trunnion Bearings" className="w-full border border-slate-300 rounded p-1.5" />
-                </div>
-
-                <div>
-                  <label className="block font-semibold mb-1">Quantity</label>
-                  <input name="quantity" type="number" defaultValue="2" min="1" className="w-full border border-slate-300 rounded p-1.5" />
-                </div>
-
-                <div>
-                  <label className="block font-semibold mb-1">Unit Rate (₹)</label>
-                  <input name="unit_rate" type="number" defaultValue="4500" step="100" className="w-full border border-slate-300 rounded p-1.5" />
-                </div>
-
-                <div className="flex items-end">
-                  <button type="submit" className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold p-1.5 rounded">
-                    + Add Rule
-                  </button>
-                </div>
-              </form>
-
-              {/* Table of active bought-out rules */}
-              <div className="mt-4 overflow-x-auto max-h-60 overflow-y-auto">
-                <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200 sticky top-0">
-                    <tr>
-                      <th className="py-2 px-3">Equipment</th>
-                      <th className="py-2 px-3">Size Class</th>
-                      <th className="py-2 px-3">Item Name</th>
-                      <th className="py-2 px-3">Qty</th>
-                      <th className="py-2 px-3 text-right">Unit Rate</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 font-medium">
-                    {boughtOutItems.map((bo, idx) => (
-                      <tr key={idx} className="hover:bg-slate-50">
-                        <td className="py-1.5 px-3">{bo.equipment_type}</td>
-                        <td className="py-1.5 px-3">
-                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-slate-100 font-semibold">
-                            {bo.size_category}
-                          </span>
-                        </td>
-                        <td className="py-1.5 px-3 font-semibold text-slate-800">{bo.item_name}</td>
-                        <td className="py-1.5 px-3">{bo.quantity} {bo.unit}</td>
-                        <td className="py-1.5 px-3 text-right font-mono">{formatINR(bo.unit_rate)}</td>
+                <div className="overflow-x-auto max-h-48 overflow-y-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-50 text-slate-600 font-semibold sticky top-0">
+                      <tr>
+                        <th className="py-1.5 px-3">Material Grade</th>
+                        <th className="py-1.5 px-3">Previous Rate</th>
+                        <th className="py-1.5 px-3">New Rate</th>
+                        <th className="py-1.5 px-3">Changed At</th>
+                        <th className="py-1.5 px-3">Author</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            {/* 4. Actuation Packages Table */}
-            <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-5 space-y-3">
-              <div>
-                <h3 className="font-bold text-slate-900 text-sm">Configured Actuation Packages</h3>
-                <p className="text-xs text-slate-500">Actuator, gearbox, and mounting charges by equipment & size</p>
-              </div>
-
-              <div className="overflow-x-auto max-h-60 overflow-y-auto">
-                <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200 sticky top-0">
-                    <tr>
-                      <th className="py-2 px-3">Equipment</th>
-                      <th className="py-2 px-3">Actuation Type</th>
-                      <th className="py-2 px-3">Size Class</th>
-                      <th className="py-2 px-3 text-right">Actuator</th>
-                      <th className="py-2 px-3 text-right">Gearbox</th>
-                      <th className="py-2 px-3 text-right">Misc</th>
-                      <th className="py-2 px-3 text-right font-bold">Total Package</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 font-medium">
-                    {actuationPackages.map((act, idx) => {
-                      const totalPkg = act.actuator_cost + act.gearbox_cost + act.misc_cost;
-                      return (
-                        <tr key={idx} className="hover:bg-slate-50">
-                          <td className="py-1.5 px-3">{act.equipment_type}</td>
-                          <td className="py-1.5 px-3 font-semibold text-slate-800">{act.actuation_type}</td>
-                          <td className="py-1.5 px-3">
-                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-slate-100 font-semibold">
-                              {act.size_category}
-                            </span>
-                          </td>
-                          <td className="py-1.5 px-3 text-right font-mono">{formatINR(act.actuator_cost)}</td>
-                          <td className="py-1.5 px-3 text-right font-mono">{formatINR(act.gearbox_cost)}</td>
-                          <td className="py-1.5 px-3 text-right font-mono">{formatINR(act.misc_cost)}</td>
-                          <td className="py-1.5 px-3 text-right font-mono font-bold text-slate-900">{formatINR(totalPkg)}</td>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-mono">
+                      {materialAudits.map((a) => (
+                        <tr key={a.id} className="hover:bg-slate-50">
+                          <td className="py-1.5 px-3 font-semibold text-slate-900 font-sans">{a.material_name}</td>
+                          <td className="py-1.5 px-3 text-slate-500">₹{a.previous_rate}</td>
+                          <td className="py-1.5 px-3 font-bold text-amber-700">₹{a.new_rate}</td>
+                          <td className="py-1.5 px-3 text-slate-500">{new Date(a.changed_at).toLocaleString()}</td>
+                          <td className="py-1.5 px-3 text-slate-600 font-sans">{a.changed_by}</td>
                         </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
-            </div>
+            )}
           </div>
         )}
       </main>

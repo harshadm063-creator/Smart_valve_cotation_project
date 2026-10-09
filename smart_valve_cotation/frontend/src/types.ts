@@ -6,6 +6,16 @@ export interface MaterialItem {
   fab_multiplier: number;
   unit: string;
   is_active?: boolean;
+  is_configurable_estimate?: boolean;
+}
+
+export interface MaterialRateAudit {
+  id: number;
+  material_name: string;
+  previous_rate: number;
+  new_rate: number;
+  changed_at: string;
+  changed_by: string;
 }
 
 export interface ProcessingRateItem {
@@ -41,21 +51,30 @@ export interface ActuationPackage {
 export interface BOMItem {
   id?: number;
   part_name: string;
-  category: string;
-  shape: 'plate' | 'round_bar' | 'pipe';
+  category?: string;
+  shape?: string;
   material_grade: string;
-  length: number;
-  width: number;
-  thickness: number;
-  diameter: number;
-  wall_thickness: number;
+  length?: number;
+  width?: number;
+  thickness?: number;
+  diameter?: number;
+  wall_thickness?: number;
   quantity: number;
-  unit_machining_rate: number;
-  unit_weight?: number;
-  total_weight?: number;
-  raw_material_cost?: number;
-  cutting_cost?: number;
+  unit: string;
+  unit_weight: number;
+  unit_material_rate: number;
+  unit_machining_rate?: number;
   machining_cost?: number;
+  fabrication_cost?: number;
+  raw_material_cost?: number;
+  component_total?: number;
+  rate_source?: 'material_default' | 'custom' | string;
+  unit_weight_override?: number;
+  unit_fabrication_cost?: number;
+  is_purchased?: boolean;
+  unit_purchase_rate?: number;
+  purchase_cost?: number;
+  cutting_cost?: number;
 }
 
 export interface CostBreakdown {

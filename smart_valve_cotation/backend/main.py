@@ -10,20 +10,36 @@ from sqlalchemy.orm import Session
 from backend.database import engine, Base, get_db
 from backend.models import (
     Material, ProcessingRate, BoughtOutItem, ActuationPackage,
-    Quotation, QuotationBOMItem
+    Quotation, QuotationBOMItem, MaterialRateAudit
 )
 from backend.schemas import (
-    EquipmentConfigInput, EstimateCalculationResponse,
+    EquipmentConfigInput, EstimateCalculationResponse, BOMItemInput,
     QuotationSummary, QuotationDetailResponse,
     MaterialSchema, MaterialUpdateSchema,
     ProcessingRateSchema, ProcessingRateUpdateSchema,
     BoughtOutItemSchema, ActuationPackageSchema,
-    ExtractionResponse, CostBreakdown, BOMItemResponse
+    ExtractionResponse, CostBreakdown, BOMItemResponse, MaterialRateAuditSchema
 )
 from backend.seed_data import seed_database
 from backend.services.calculation_service import calculate_full_estimate
 from backend.services.pdf_extractor import extract_pdf_specifications
 from backend.services.pdf_generator import generate_quotation_pdf
+
+
+def bom_extra_fields(item):
+    return {
+        "unit": item.unit,
+        "unit_weight_override": item.unit_weight_override,
+        "unit_material_rate": item.unit_material_rate,
+        "rate_source": item.rate_source,
+        "unit_fabrication_cost": item.unit_fabrication_cost,
+        "material_rate": item.material_rate,
+        "fabrication_cost": item.fabrication_cost,
+        "component_total": item.component_total,
+        "is_purchased": item.is_purchased,
+        "unit_purchase_rate": item.unit_purchase_rate,
+        "purchase_cost": item.purchase_cost,
+    }
 
 # Ensure database tables and seed data exist
 seed_database()
@@ -70,7 +86,15 @@ def get_dropdown_options(db: Session = Depends(get_db)):
                 "id": "Butterfly Valve",
                 "label": "Butterfly Valve",
                 "description": "Quarter-turn circular disc valve for pipelines, ductwork, and process water/gas."
-            }
+            },
+            *[
+                {"id": name, "label": name, "description": "Preliminary component template; confirm against approved equipment drawings."}
+                for name in (
+                    "Gate Valve", "Globe Valve", "Ball Valve", "Check Valve",
+                    "Pressure Relief Valve", "Single-Blade Damper", "Multi-Blade Damper",
+                    "Flue Gas Damper", "Guillotine Damper", "Diverter Damper",
+                )
+            ]
         ],
         "materials": [
             {
@@ -230,7 +254,8 @@ def create_estimate(config: EquipmentConfigInput, db: Session = Depends(get_db))
             raw_material_cost=item.raw_material_cost,
             cutting_cost=item.cutting_cost,
             machining_cost=item.machining_cost,
-            unit_machining_rate=item.unit_machining_rate
+            unit_machining_rate=item.unit_machining_rate,
+            **bom_extra_fields(item)
         )
         db.add(b_item)
 
@@ -368,7 +393,8 @@ def update_estimate(estimate_id: int, config: EquipmentConfigInput, db: Session 
             raw_material_cost=item.raw_material_cost,
             cutting_cost=item.cutting_cost,
             machining_cost=item.machining_cost,
-            unit_machining_rate=item.unit_machining_rate
+            unit_machining_rate=item.unit_machining_rate,
+            **bom_extra_fields(item)
         )
         db.add(b_item)
 
@@ -449,7 +475,8 @@ def duplicate_estimate(estimate_id: int, db: Session = Depends(get_db)):
             raw_material_cost=item.raw_material_cost,
             cutting_cost=item.cutting_cost,
             machining_cost=item.machining_cost,
-            unit_machining_rate=item.unit_machining_rate
+            unit_machining_rate=item.unit_machining_rate,
+            **bom_extra_fields(item)
         )
         db.add(b_item)
 
@@ -476,7 +503,15 @@ def recalculate_estimate_with_current_rates(estimate_id: int, db: Session = Depe
             diameter=b.diameter,
             wall_thickness=b.wall_thickness,
             quantity=b.quantity,
-            unit_machining_rate=b.unit_machining_rate
+            unit_machining_rate=b.unit_machining_rate,
+            unit_weight_override=b.unit_weight_override,
+            unit_material_rate=b.unit_material_rate,
+            rate_source=b.rate_source,
+            unit_fabrication_cost=b.unit_fabrication_cost,
+            unit=b.unit,
+            is_purchased=b.is_purchased,
+            unit_purchase_rate=b.unit_purchase_rate,
+            **bom_extra_fields(b)
         ) for b in q.bom_items
     ]
 
@@ -533,7 +568,8 @@ def recalculate_estimate_with_current_rates(estimate_id: int, db: Session = Depe
             raw_material_cost=item.raw_material_cost,
             cutting_cost=item.cutting_cost,
             machining_cost=item.machining_cost,
-            unit_machining_rate=item.unit_machining_rate
+            unit_machining_rate=item.unit_machining_rate,
+            **bom_extra_fields(item)
         )
         db.add(b_item)
 
@@ -639,7 +675,56 @@ def update_material(material_id: int, payload: MaterialUpdateSchema, db: Session
     if not m:
         raise HTTPException(status_code=404, detail="Material not found")
     if payload.raw_rate is not None:
+        previous_rate = m.raw_rate
         m.raw_rate = payload.raw_rate
+        if previous_rate != payload.raw_rate:
+            db.add(MaterialRateAudit(
+                material_name=m.name,
+                previous_rate=previous_rate,
+                new_rate=payload.raw_rate,
+                changed_by="Administrator",
+            ))
+        if payload.apply_to_bom_item_ids:
+            selected_items = db.query(QuotationBOMItem).filter(
+                QuotationBOMItem.id.in_(payload.apply_to_bom_item_ids),
+                QuotationBOMItem.material_grade == m.name,
+            ).all()
+            if len(selected_items) != len(set(payload.apply_to_bom_item_ids)):
+                raise HTTPException(
+                    status_code=400,
+                    detail="One or more selected BOM items were not found or do not use this material.",
+                )
+            affected_quotes = set()
+            for bom_item in selected_items:
+                bom_item.unit_material_rate = payload.raw_rate
+                bom_item.rate_source = "material_default"
+                bom_item.material_rate = payload.raw_rate
+                bom_item.raw_material_cost = round(
+                    bom_item.total_weight * payload.raw_rate, 2
+                )
+                bom_item.component_total = round(
+                    bom_item.raw_material_cost + bom_item.cutting_cost +
+                    bom_item.machining_cost + bom_item.fabrication_cost +
+                    bom_item.purchase_cost, 2
+                )
+                affected_quotes.add(bom_item.quotation)
+            for quote in affected_quotes:
+                quote.raw_material_cost = round(
+                    sum(item.raw_material_cost for item in quote.bom_items), 2
+                )
+                quote.subtotal = round(
+                    quote.raw_material_cost + quote.cutting_cost + quote.machining_cost +
+                    quote.fabrication_cost + quote.finishing_cost + quote.bought_out_cost +
+                    quote.actuation_cost, 2
+                )
+                quote.margin_amount = round(quote.subtotal * quote.margin_percent / 100, 2)
+                quote.tax_amount = round(
+                    (quote.subtotal + quote.margin_amount) * quote.tax_percent / 100, 2
+                )
+                quote.final_amount = round(
+                    quote.subtotal + quote.margin_amount + quote.tax_amount, 2
+                )
+                quote.updated_at = datetime.utcnow()
     if payload.density is not None:
         m.density = payload.density
     if payload.fab_multiplier is not None:
@@ -650,6 +735,15 @@ def update_material(material_id: int, payload: MaterialUpdateSchema, db: Session
     db.commit()
     db.refresh(m)
     return m
+
+@app.get("/api/v1/material-rate-audit", response_model=List[MaterialRateAuditSchema])
+def list_material_rate_audit(
+    material_name: Optional[str] = None, db: Session = Depends(get_db)
+):
+    query = db.query(MaterialRateAudit)
+    if material_name:
+        query = query.filter(MaterialRateAudit.material_name == material_name)
+    return query.order_by(MaterialRateAudit.changed_at.desc()).limit(200).all()
 
 @app.post("/api/v1/materials", response_model=MaterialSchema)
 def create_material(payload: MaterialSchema, db: Session = Depends(get_db)):

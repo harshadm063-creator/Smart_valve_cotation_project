@@ -69,13 +69,20 @@ def calculate_full_estimate(
     total_cutting_cost = 0.0
     total_machining_cost = 0.0
     total_fabrication_cost = 0.0
+    total_custom_bought_out_cost = 0.0
+    bought_out_list: List[BoughtOutItemSchema] = []
 
     for idx, item in enumerate(raw_bom_items):
         shape = item.get("shape", "plate")
         mat_name = item.get("material_grade", body_material)
+        is_purchased = bool(item.get("is_purchased", shape in ("purchased", "non_stock")))
         mat_obj = materials_db.get(mat_name)
 
-        if not mat_obj:
+        if is_purchased:
+            density = 0.0
+            raw_rate = 0.0
+            fab_multiplier = 1.0
+        elif not mat_obj:
             # Fallback safe defaults if material not in DB
             density = 0.00000785
             raw_rate = 80.0
@@ -87,24 +94,57 @@ def calculate_full_estimate(
             fab_multiplier = mat_obj.fab_multiplier
 
         dims = {
-            "length": float(item.get("length", 0.0)),
-            "width": float(item.get("width", 0.0)),
-            "thickness": float(item.get("thickness", 0.0)),
-            "diameter": float(item.get("diameter", 0.0)),
-            "wall_thickness": float(item.get("wall_thickness", 0.0))
+            "length": float(item.get("length", 0.0) or 0.0),
+            "width": float(item.get("width", 0.0) or 0.0),
+            "thickness": float(item.get("thickness", 0.0) or 0.0),
+            "diameter": float(item.get("diameter", 0.0) or 0.0),
+            "wall_thickness": float(item.get("wall_thickness", 0.0) or 0.0)
         }
 
-        vol = calculate_volume(shape, dims)
-        item_qty = int(item.get("quantity", 1))
-        unit_wt, total_wt = calculate_weight(vol, density, item_qty)
+        vol = 0.0 if is_purchased else calculate_volume(shape, dims)
+        item_qty = max(1, int(item.get("quantity", 1) or 1))
+        override_wt = item.get("unit_weight_override")
+        explicit_unit_wt = item.get("unit_weight")
+        if override_wt is not None:
+            unit_wt = float(override_wt)
+        elif explicit_unit_wt is not None and float(explicit_unit_wt or 0.0) > 0:
+            unit_wt = float(explicit_unit_wt)
+        elif is_purchased:
+            unit_wt = 0.0
+        else:
+            unit_wt = calculate_weight(vol, density, 1)[0]
+        total_wt = unit_wt * item_qty
 
-        item_raw_cost = total_wt * raw_rate
-        item_cutting_cost = total_wt * cutting_rate
-        machining_rate = float(item.get("unit_machining_rate", 0.0))
-        item_machining_cost = float(item_qty) * machining_rate
+        rate_source = item.get("rate_source", "material_default")
+        explicit_rate = item.get("unit_material_rate")
+        material_rate = float(explicit_rate if explicit_rate is not None else raw_rate)
+        if explicit_rate is not None:
+            rate_source = item.get("rate_source", "custom")
+        item_raw_cost = 0.0 if is_purchased else total_wt * material_rate
+        item_cutting_cost = 0.0 if is_purchased else total_wt * cutting_rate
+        machining_rate = float(item.get("unit_machining_rate", 0.0) or 0.0)
+        machining_cost_value = item.get("machining_cost")
+        if machining_cost_value is not None and float(machining_cost_value or 0.0) > 0:
+            item_machining_cost = float(machining_cost_value)
+        elif is_purchased:
+            item_machining_cost = 0.0
+        else:
+            item_machining_cost = float(item_qty) * machining_rate
 
-        # Fabrication cost per component = total_weight * base_fab_rate * fab_multiplier
-        item_fab_cost = total_wt * base_fab_rate * fab_multiplier
+        unit_fab_cost = item.get("unit_fabrication_cost")
+        fabrication_cost_value = item.get("fabrication_cost")
+        if unit_fab_cost is not None:
+            item_fab_cost = float(unit_fab_cost) * item_qty
+        elif fabrication_cost_value is not None and float(fabrication_cost_value or 0.0) > 0:
+            item_fab_cost = float(fabrication_cost_value)
+        elif is_purchased:
+            item_fab_cost = 0.0
+        else:
+            item_fab_cost = total_wt * base_fab_rate * fab_multiplier
+        unit_purchase_rate = float(item.get("unit_purchase_rate", 0.0) or 0.0) if is_purchased else 0.0
+        purchase_cost = item_qty * unit_purchase_rate
+        total_custom_bought_out_cost += purchase_cost
+        component_total = item_raw_cost + item_cutting_cost + item_machining_cost + item_fab_cost + purchase_cost
 
         total_equipment_weight += total_wt
         total_raw_material_cost += item_raw_cost
@@ -125,12 +165,35 @@ def calculate_full_estimate(
             wall_thickness=dims["wall_thickness"],
             quantity=item_qty,
             unit_machining_rate=machining_rate,
+            unit=item.get("unit", "piece"),
+            unit_weight_override=item.get("unit_weight_override"),
+            unit_material_rate=item.get("unit_material_rate"),
+            rate_source=rate_source,
+            unit_fabrication_cost=item.get("unit_fabrication_cost"),
+            is_purchased=is_purchased,
+            unit_purchase_rate=unit_purchase_rate,
             unit_weight=round(unit_wt, 3),
             total_weight=round(total_wt, 3),
             raw_material_cost=round(item_raw_cost, 2),
             cutting_cost=round(item_cutting_cost, 2),
-            machining_cost=round(item_machining_cost, 2)
+            machining_cost=round(item_machining_cost, 2),
+            fabrication_cost=round(item_fab_cost, 2),
+            material_rate=round(material_rate, 2),
+            component_total=round(component_total, 2),
+            purchase_cost=round(purchase_cost, 2),
         ))
+        if is_purchased:
+            if unit_purchase_rate == 0 and item.get("part_name") != "Actuator":
+                warnings.append(f"Bought-out component '{item.get('part_name', 'Component')}' has no configured unit price.")
+            else:
+                bought_out_list.append(BoughtOutItemSchema(
+                    equipment_type=equipment_type,
+                    size_category=size_category,
+                    item_name=item.get("part_name", f"Part {idx + 1}"),
+                    quantity=item_qty,
+                    unit_rate=unit_purchase_rate,
+                    unit=item.get("unit", "piece"),
+                ))
 
     total_equipment_weight = round(total_equipment_weight, 3)
     total_finishing_cost = round(total_equipment_weight * finishing_rate, 2)
@@ -141,8 +204,7 @@ def calculate_full_estimate(
         BoughtOutItem.size_category == size_category
     ).all()
 
-    bought_out_list: List[BoughtOutItemSchema] = []
-    total_bought_out_cost = 0.0
+    total_bought_out_cost = total_custom_bought_out_cost
 
     if not bought_out_query:
         # Check specific rule requirement for Butterfly Valve Medium or other missing sets:
@@ -243,6 +305,18 @@ def calculate_full_estimate(
     tax_amount = (taxable_amount * (tax_percent / 100.0)) if tax_percent else 0.0
     final_amount = taxable_amount + tax_amount
 
+    pricing_snapshot = {
+        "rates": rates_db,
+        "materials": {m.name: {"density": m.density, "raw_rate": m.raw_rate, "fab_multiplier": m.fab_multiplier} for m in materials_db.values()},
+        "component_rates": [
+            {"part_name": item.part_name, "material_grade": item.material_grade,
+             "unit_material_rate": item.material_rate, "rate_source": item.rate_source}
+            for item in calculated_bom
+        ],
+        "size_category": size_category,
+        "governing_reason": gov_reason
+    }
+
     cost_breakdown = CostBreakdown(
         raw_material_cost=round(total_raw_material_cost * quantity, 2),
         cutting_cost=round(total_cutting_cost * quantity, 2),
@@ -258,13 +332,6 @@ def calculate_full_estimate(
         margin_amount=round(margin_amount, 2),
         final_amount=round(final_amount, 2)
     )
-
-    pricing_snapshot = {
-        "rates": rates_db,
-        "materials": {m.name: {"density": m.density, "raw_rate": m.raw_rate, "fab_multiplier": m.fab_multiplier} for m in materials_db.values()},
-        "size_category": size_category,
-        "governing_reason": gov_reason
-    }
 
     return {
         "equipment_type": equipment_type,

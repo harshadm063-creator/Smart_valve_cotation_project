@@ -11,12 +11,22 @@ class MaterialSchema(BaseModel):
     unit: str = "₹/kg"
     is_active: bool = True
     updated_at: Optional[datetime] = None
+    is_configurable_estimate: bool = True
 
 class MaterialUpdateSchema(BaseModel):
     raw_rate: Optional[float] = None
     density: Optional[float] = None
     fab_multiplier: Optional[float] = None
     is_active: Optional[bool] = None
+    apply_to_bom_item_ids: Optional[List[int]] = None
+
+class MaterialRateAuditSchema(BaseModel):
+    id: int
+    material_name: str
+    previous_rate: float
+    new_rate: float
+    changed_at: datetime
+    changed_by: str
 
 class ProcessingRateSchema(BaseModel):
     id: Optional[int] = None
@@ -62,6 +72,13 @@ class BOMItemInput(BaseModel):
     wall_thickness: float = 0.0
     quantity: int = 1
     unit_machining_rate: float = 0.0
+    unit: str = "piece"
+    unit_weight_override: Optional[float] = Field(None, ge=0)
+    unit_material_rate: Optional[float] = Field(None, ge=0)
+    rate_source: str = "material_default"
+    unit_fabrication_cost: Optional[float] = Field(None, ge=0)
+    is_purchased: bool = False
+    unit_purchase_rate: float = Field(0, ge=0)
 
 class BOMItemResponse(BOMItemInput):
     unit_weight: float
@@ -69,6 +86,10 @@ class BOMItemResponse(BOMItemInput):
     raw_material_cost: float
     cutting_cost: float
     machining_cost: float
+    fabrication_cost: float = 0.0
+    material_rate: float = 0.0
+    component_total: float = 0.0
+    purchase_cost: float = 0.0
 
 class EquipmentConfigInput(BaseModel):
     # Customer Details

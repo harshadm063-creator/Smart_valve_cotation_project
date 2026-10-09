@@ -1,3 +1,4 @@
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 from datetime import datetime
 from backend.database import Base, engine, SessionLocal
@@ -6,6 +7,26 @@ from backend.services.calculation_service import calculate_full_estimate
 
 def seed_database():
     Base.metadata.create_all(bind=engine)
+    bom_columns = {column["name"] for column in inspect(engine).get_columns("quotation_bom_items")}
+    new_bom_columns = {
+        "unit": "VARCHAR DEFAULT 'piece' NOT NULL",
+        "unit_weight_override": "FLOAT",
+        "unit_material_rate": "FLOAT",
+        "rate_source": "VARCHAR DEFAULT 'material_default' NOT NULL",
+        "unit_fabrication_cost": "FLOAT",
+        "material_rate": "FLOAT DEFAULT 0 NOT NULL",
+        "fabrication_cost": "FLOAT DEFAULT 0 NOT NULL",
+        "component_total": "FLOAT DEFAULT 0 NOT NULL",
+        "is_purchased": "BOOLEAN DEFAULT 0 NOT NULL",
+        "unit_purchase_rate": "FLOAT DEFAULT 0 NOT NULL",
+        "purchase_cost": "FLOAT DEFAULT 0 NOT NULL",
+    }
+    with engine.begin() as connection:
+        for column_name, column_sql in new_bom_columns.items():
+            if column_name not in bom_columns:
+                connection.execute(text(
+                    f"ALTER TABLE quotation_bom_items ADD COLUMN {column_name} {column_sql}"
+                ))
     db = SessionLocal()
 
     try:
@@ -20,6 +41,28 @@ def seed_database():
             ]
             db.add_all(materials)
             db.commit()
+
+        additional_materials = [
+            ("Cast Iron", 0.00000720, 55.0),
+            ("Ductile Iron", 0.00000710, 75.0),
+            ("SS 304", 0.00000800, 250.0),
+            ("SS 316", 0.00000800, 310.0),
+            ("Galvanized Steel", 0.00000785, 90.0),
+            ("Bronze", 0.00000880, 650.0),
+            ("PTFE", 0.00000220, 900.0),
+            ("EPDM", 0.00000120, 350.0),
+            ("Graphite Packing", 0.00000180, 600.0),
+        ]
+        existing_material_names = {material.name for material in db.query(Material.name).all()}
+        for material_name, density, rate in additional_materials:
+            if material_name in existing_material_names:
+                continue
+            db.add(Material(
+                name=material_name, density=density, raw_rate=rate,
+                fab_multiplier=1.0, unit="₹/kg",
+            ))
+            existing_material_names.add(material_name)
+        db.commit()
 
         # 2. Processing Rates
         if db.query(ProcessingRate).count() == 0:
